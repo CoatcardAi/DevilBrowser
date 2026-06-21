@@ -1,0 +1,24 @@
+{
+  "name": "devil-browser",
+  "version": "0.1.0",
+  "description": "Electron-based desktop browser with modern UI and content protection",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "keywords": [
+    "electron",
+    "browser",
+    "desktop"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^25.9.8"
+  },
+  "dependencies": {
+    "electron-store": "^8.1.0"
+  }
+}
