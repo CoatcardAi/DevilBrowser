@@ -203,7 +203,7 @@ function createMainWindow(isIncognito = false) {
     tabs: [],
     activeTabId: null,
     closedTabsHistory: [],
-    toolbarHeight: 86,
+    toolbarHeight: 138,
     rightMargin: 0
   });
 
@@ -269,12 +269,22 @@ function updateActiveViewBounds(winId) {
   const topOffset = data.toolbarHeight || 86;
   const rightOffset = data.rightMargin || 0;
   
-  activeTab.view.setBounds({
-    x: 0,
-    y: topOffset,
-    width: bounds.width - rightOffset,
-    height: bounds.height - topOffset
-  });
+  if (activeTab.url === 'about:blank') {
+    try {
+      data.win.removeBrowserView(activeTab.view);
+    } catch (e) {}
+  } else {
+    try {
+      data.win.addBrowserView(activeTab.view);
+    } catch (e) {}
+    
+    activeTab.view.setBounds({
+      x: 0,
+      y: topOffset,
+      width: bounds.width - rightOffset,
+      height: bounds.height - topOffset
+    });
+  }
 }
 
 function createTab(winId, url) {
@@ -297,9 +307,9 @@ function createTab(winId, url) {
   const tabEntry = {
     id: tabId,
     url: resolvedUrl,
-    title: 'Loading...',
+    title: resolvedUrl === 'about:blank' ? 'New Tab' : 'Loading...',
     view,
-    loading: true,
+    loading: resolvedUrl !== 'about:blank',
     canGoBack: false,
     canGoForward: false
   };
@@ -337,6 +347,8 @@ function createTab(winId, url) {
     tabEntry.canGoBack = view.webContents.canGoBack();
     tabEntry.canGoForward = view.webContents.canGoForward();
     
+    updateActiveViewBounds(winId);
+
     data.win.webContents.send('tab-url-updated', {
       id: tabId,
       url: currentUrl,
@@ -393,14 +405,21 @@ function setActiveTab(winId, tabId) {
     }
   });
   
-  try {
-    data.win.addBrowserView(targetTab.view);
-  } catch (e) {
-    // If already added, ignore
+  if (targetTab.url !== 'about:blank') {
+    try {
+      data.win.addBrowserView(targetTab.view);
+    } catch (e) {
+      // If already added, ignore
+    }
   }
   
   updateActiveViewBounds(winId);
-  targetTab.view.webContents.focus();
+  
+  if (targetTab.url !== 'about:blank') {
+    targetTab.view.webContents.focus();
+  } else {
+    data.win.webContents.focus();
+  }
 
   // Send update to renderer
   data.win.webContents.send('tab-activated', {
@@ -770,6 +789,8 @@ ipcMain.handle('navigate-tab', (e, { tabId, url }) => {
         targetUrl = 'https://www.google.com/search?q=' + encodeURIComponent(targetUrl);
       }
     }
+    t.url = targetUrl;
+    updateActiveViewBounds(winEntry.win.id);
     t.view.webContents.loadURL(targetUrl);
   }
 });
@@ -996,6 +1017,448 @@ ipcMain.handle('cancel-download', (e, id) => {
 });
 
 // ----------------------------------------------------
+// AI Integration — IPC Handlers
+// ----------------------------------------------------
+
+const AI_BASE = 'https://aimagicbackend.onrender.com';
+const https = require('https');
+const http  = require('http');
+const fs    = require('fs');
+
+/** Simple promisified HTTP/HTTPS request (returns parsed JSON) */
+function aiFetch(method, path, body, token) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(AI_BASE + path);
+    const lib = url.protocol === 'https:' ? https : http;
+    const bodyStr = body ? JSON.stringify(body) : '';
+    const headers = {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(bodyStr)
+    };
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+
+    const req = lib.request({
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname + url.search,
+      method,
+      headers,
+      timeout: 30000
+    }, (res) => {
+      const contentType = res.headers['content-type'] || '';
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => {
+        const buffer = Buffer.concat(chunks);
+        if (res.statusCode === 200 && contentType.startsWith('image/')) {
+          const base64Data = buffer.toString('base64');
+          resolve({
+            status: res.statusCode,
+            body: {
+              images: [
+                {
+                  mimeType: contentType,
+                  data: base64Data
+                }
+              ]
+            }
+          });
+        } else {
+          const data = buffer.toString('utf8');
+          try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+          catch { resolve({ status: res.statusCode, body: data }); }
+        }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('Request timed out')); });
+    if (bodyStr) req.write(bodyStr);
+    req.end();
+  });
+}
+
+// ── Auth ──
+ipcMain.handle('ai-login', async (e, email) => {
+  try {
+    const res = await aiFetch('POST', '/auth/login', { email }, null);
+    return res.body;
+  } catch(err) { return { error: err.message }; }
+});
+
+ipcMain.handle('ai-verify-otp', async (e, { email, otp }) => {
+  try {
+    const res = await aiFetch('POST', '/auth/verify', { email, otp }, null);
+    if (res.body && res.body.token) {
+      store.set('ai-token', res.body.token);
+      // Fetch me to return role info
+      try {
+        const meRes = await aiFetch('GET', '/auth/me', null, res.body.token);
+        return { token: res.body.token, me: meRes.body };
+      } catch { return { token: res.body.token }; }
+    }
+    return res.body;
+  } catch(err) { return { error: err.message }; }
+});
+
+ipcMain.handle('ai-logout', async () => {
+  const token = store.get('ai-token');
+  if (token) {
+    try { await aiFetch('POST', '/auth/logout', {}, token); } catch {}
+    store.delete('ai-token');
+  }
+  return { success: true };
+});
+
+ipcMain.handle('ai-get-me', async () => {
+  const token = store.get('ai-token');
+  if (!token) return null;
+  try {
+    const res = await aiFetch('GET', '/auth/me', null, token);
+    if (res.status === 401) { store.delete('ai-token'); return null; }
+    return res.body;
+  } catch { return null; }
+});
+
+ipcMain.handle('ai-get-token', () => store.get('ai-token') || null);
+
+// ── Quota ──
+ipcMain.handle('ai-get-quota', async () => {
+  const token = store.get('ai-token');
+  if (!token) return null;
+  try {
+    const res = await aiFetch('GET', '/v1/quota', null, token);
+    return res.body;
+  } catch { return null; }
+});
+
+// ── Models ──
+ipcMain.handle('ai-get-models', async () => {
+  const token = store.get('ai-token');
+  if (!token) return { models: [] };
+  try {
+    const res = await aiFetch('GET', '/v1/models/available', null, token);
+    return res.body;
+  } catch { return { models: [] }; }
+});
+
+// ── Non-streaming Generate ──
+ipcMain.handle('ai-generate', async (e, payload) => {
+  const token = store.get('ai-token');
+  if (!token) return { error: 'Not authenticated' };
+  try {
+    const res = await aiFetch('POST', '/v1/generate', payload, token);
+    if (res.status === 401) { store.delete('ai-token'); return { error: '401' }; }
+    return res.body;
+  } catch(err) { return { error: err.message }; }
+});
+
+ipcMain.handle('save-image', async (e, { base64Data, defaultFilename }) => {
+  try {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (!win) return { success: false, error: 'Window not found' };
+    
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+      defaultPath: path.join(app.getPath('downloads'), defaultFilename || 'generated-image.png'),
+      filters: [
+        { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }
+      ]
+    });
+    
+    if (canceled || !filePath) {
+      return { success: false, error: 'Canceled' };
+    }
+    
+    const buffer = Buffer.from(base64Data, 'base64');
+    fs.writeFileSync(filePath, buffer);
+    return { success: true, filePath };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// ── Streaming Generate ──
+ipcMain.handle('ai-generate-stream', async (e, payload) => {
+  const token = store.get('ai-token');
+  const sender = e.sender;
+  if (!token) {
+    sender.send('ai-stream-error', 'Not authenticated');
+    return;
+  }
+
+  const url = new URL(AI_BASE + '/v1/generate/stream');
+  const lib = url.protocol === 'https:' ? https : http;
+  const bodyStr = JSON.stringify(payload);
+
+  const req = lib.request({
+    hostname: url.hostname,
+    port: url.port || (url.protocol === 'https:' ? 443 : 80),
+    path: url.pathname,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(bodyStr),
+      'Authorization': 'Bearer ' + token,
+      'Accept': 'text/event-stream'
+    },
+    timeout: 120000
+  }, (res) => {
+    if (res.statusCode === 401) {
+      store.delete('ai-token');
+      sender.send('ai-stream-error', '401 session expired');
+      return;
+    }
+    if (res.statusCode !== 200) {
+      let errData = '';
+      res.on('data', c => errData += c);
+      res.on('end', () => sender.send('ai-stream-error', errData || `HTTP ${res.statusCode}`));
+      return;
+    }
+
+    let buffer = '';
+    res.on('data', (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // keep incomplete line
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const raw = line.slice(6).trim();
+        if (raw === '[DONE]') {
+          sender.send('ai-stream-done');
+          return;
+        }
+        try {
+          const parsed = JSON.parse(raw);
+          const text = parsed?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) sender.send('ai-stream-chunk', text);
+          // Check for error event in stream
+          if (parsed?.error) sender.send('ai-stream-error', parsed.error);
+        } catch {}
+      }
+    });
+    res.on('end', () => sender.send('ai-stream-done'));
+    res.on('error', (err) => sender.send('ai-stream-error', err.message));
+  });
+
+  req.on('error', (err) => sender.send('ai-stream-error', err.message));
+  req.on('timeout', () => { req.destroy(); sender.send('ai-stream-error', 'Stream timed out'); });
+  req.write(bodyStr);
+  req.end();
+});
+
+// ── Logs ──
+ipcMain.handle('ai-get-logs', async (e, params = {}) => {
+  const token = store.get('ai-token');
+  if (!token) return { logs: [], total: 0 };
+  try {
+    const qs = new URLSearchParams();
+    if (params.limit)  qs.set('limit',  params.limit);
+    if (params.skip)   qs.set('skip',   params.skip);
+    if (params.status) qs.set('status', params.status);
+    if (params.model)  qs.set('model',  params.model);
+    const res = await aiFetch('GET', '/v1/logs?' + qs.toString(), null, token);
+    return res.body;
+  } catch { return { logs: [], total: 0 }; }
+});
+
+// ── Page Text Extraction ──
+ipcMain.handle('ai-get-page-text', async (e) => {
+  // Find the active tab's webContents
+  const winEntry = getWindowEntry(e.sender);
+  if (!winEntry || !winEntry.activeTabId) return '';
+  const tab = winEntry.tabs.find(t => t.id === winEntry.activeTabId);
+  if (!tab) return '';
+  try {
+    const text = await tab.view.webContents.executeJavaScript(
+      `(function(){ return document.body ? document.body.innerText.slice(0, 50000) : ''; })()`
+    );
+    return text || '';
+  } catch { return ''; }
+});
+
+ipcMain.handle('ai-get-page-dom', async (e) => {
+  const winEntry = getWindowEntry(e.sender);
+  if (!winEntry || !winEntry.activeTabId) return '[]';
+  const tab = winEntry.tabs.find(t => t.id === winEntry.activeTabId);
+  if (!tab) return '[]';
+  try {
+    const domJSON = await tab.view.webContents.executeJavaScript(`
+      (function() {
+        const els = Array.from(document.querySelectorAll('input, textarea, select, button, [role="button"], a'));
+        return JSON.stringify(els.map(el => ({
+          tagName: el.tagName.toLowerCase(),
+          type: el.type || el.getAttribute('type') || null,
+          id: el.id || null,
+          name: el.name || el.getAttribute('name') || null,
+          placeholder: el.placeholder || el.getAttribute('placeholder') || null,
+          labelText: el.labels && el.labels.length > 0 ? el.labels[0].innerText : (el.closest('label') ? el.closest('label').innerText : null),
+          innerText: (el.innerText || '').trim().slice(0, 100),
+          value: el.value || null,
+          role: el.getAttribute('role') || null,
+          ariaLabel: el.getAttribute('aria-label') || null
+        })));
+      })()
+    `);
+    return domJSON || '[]';
+  } catch (err) {
+    return JSON.stringify({ error: err.message });
+  }
+});
+
+ipcMain.handle('ai-execute-page-action', async (e, script) => {
+  const winEntry = getWindowEntry(e.sender);
+  if (!winEntry || !winEntry.activeTabId) return { success: false, error: 'No active window/tab found' };
+  const tab = winEntry.tabs.find(t => t.id === winEntry.activeTabId);
+  if (!tab) return { success: false, error: 'No active tab found' };
+  try {
+    const result = await tab.view.webContents.executeJavaScript(script);
+    return { success: true, result };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+
+// ── Document Analysis ──
+ipcMain.handle('ai-analyse-document', async (e, { filePath, mimeType, name }) => {
+  const token = store.get('ai-token');
+  if (!token) return { error: 'Not authenticated' };
+  try {
+    const data = fs.readFileSync(filePath).toString('base64');
+    const res = await aiFetch('POST', '/v1/generate', {
+      prompt: `Please analyse this document called "${name}" and provide a comprehensive summary. Highlight key points, data, and conclusions.`,
+      files: [{ mimeType, data, name }]
+    }, token);
+    return res.body;
+  } catch(err) { return { error: err.message }; }
+});
+
+// ── Tools Marketplace ──
+ipcMain.handle('ai-get-tools', async () => {
+  const token = store.get('ai-token');
+  if (!token) return { items: [] };
+  try {
+    const res = await aiFetch('GET', '/v1/tools?limit=100', null, token);
+    return res.body;
+  } catch { return { items: [] }; }
+});
+
+ipcMain.handle('ai-download-tool', async (e, { id, filename, type }) => {
+  const token = store.get('ai-token');
+  if (!token) return { error: 'Not authenticated' };
+  const downloadPath = path.join(app.getPath('downloads'), filename);
+
+  return new Promise((resolve) => {
+    const url = new URL(AI_BASE + `/v1/tools/${id}/download`);
+    const lib = url.protocol === 'https:' ? https : http;
+    const req = lib.request({
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname,
+      method: 'GET',
+      headers: { 'Authorization': 'Bearer ' + token }
+    }, (res) => {
+      if (res.statusCode === 302) {
+        // External redirect — open in browser tab
+        const winEntry = Array.from(windows.values())[0];
+        if (winEntry) createTab(winEntry.win.id, res.headers.location);
+        resolve({ success: true, type: 'external' });
+        return;
+      }
+      const file = fs.createWriteStream(downloadPath);
+      res.pipe(file);
+      file.on('finish', () => { file.close(); resolve({ success: true, path: downloadPath }); });
+      file.on('error', err => resolve({ error: err.message }));
+    });
+    req.on('error', err => resolve({ error: err.message }));
+    req.end();
+  });
+});
+
+// ── Semantic Search ──
+// Stores page embeddings in electron-store, cosine-similarity search
+ipcMain.handle('ai-index-page', async (e, { url, title, text }) => {
+  const token = store.get('ai-token');
+  if (!token || !text || text.length < 100) return;
+  try {
+    const snippet = text.slice(0, 4000); // keep within limits
+    const res = await aiFetch('POST', '/v1/embeddings', { text: snippet }, token);
+    if (res.body && res.body.embedding) {
+      const cache = store.get('ai-page-embeddings', {});
+      // Cap at 500 entries
+      const keys = Object.keys(cache);
+      if (keys.length >= 500) delete cache[keys[0]];
+      cache[url] = {
+        title,
+        embedding: res.body.embedding.values,
+        snippet: text.slice(0, 300),
+        indexedAt: Date.now()
+      };
+      store.set('ai-page-embeddings', cache);
+    }
+  } catch {}
+});
+
+ipcMain.handle('ai-semantic-search', async (e, query) => {
+  const token = store.get('ai-token');
+  if (!token || !query) return [];
+  try {
+    const res = await aiFetch('POST', '/v1/embeddings', { text: query }, token);
+    if (!res.body || !res.body.embedding) return [];
+    const qVec = res.body.embedding.values;
+    const cache = store.get('ai-page-embeddings', {});
+
+    const results = Object.entries(cache).map(([url, entry]) => {
+      const score = cosineSim(qVec, entry.embedding);
+      return { url, title: entry.title, snippet: entry.snippet, score };
+    });
+    results.sort((a, b) => b.score - a.score);
+    return results.slice(0, 8);
+  } catch { return []; }
+});
+
+function cosineSim(a, b) {
+  if (!a || !b || a.length !== b.length) return 0;
+  let dot = 0, magA = 0, magB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot  += a[i] * b[i];
+    magA += a[i] * a[i];
+    magB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(magA) * Math.sqrt(magB);
+  return denom ? dot / denom : 0;
+}
+
+// ── Context Menu from tab (ai-tab-context-action) ──
+ipcMain.on('ai-tab-context-action', (e, data) => {
+  // Forward to all main windows
+  for (const entry of windows.values()) {
+    entry.win.webContents.send('ai-context-action', data);
+  }
+});
+
+// ── Page indexing from tab (semantic search) ──
+ipcMain.on('ai-index-page-from-tab', async (e, { url, title, text }) => {
+  const token = store.get('ai-token');
+  if (!token || !text || text.length < 100 || !url || url.startsWith('about:')) return;
+  try {
+    const snippet = text.slice(0, 4000);
+    const res = await aiFetch('POST', '/v1/embeddings', { text: snippet }, token);
+    if (res.body && res.body.embedding) {
+      const cache = store.get('ai-page-embeddings', {});
+      const keys = Object.keys(cache);
+      if (keys.length >= 500) delete cache[keys[0]];
+      cache[url] = {
+        title: title || url,
+        embedding: res.body.embedding.values,
+        snippet: text.slice(0, 300),
+        indexedAt: Date.now()
+      };
+      store.set('ai-page-embeddings', cache);
+    }
+  } catch {}
+});
+
+// ----------------------------------------------------
 // App Lifecycle
 // ----------------------------------------------------
 
@@ -1169,7 +1632,7 @@ app.whenReady().then(() => {
   
   // Wait for load to create tab
   initialWin.webContents.once('did-finish-load', () => {
-    createTab(initialWin.id, 'https://www.google.com');
+    createTab(initialWin.id, 'about:blank');
   });
 });
 

@@ -138,3 +138,95 @@ const injectionCode = `
 
 // Inject into the main world execution context
 webFrame.executeJavaScript(injectionCode);
+
+// ----------------------------------------------------
+// AI Context Menu Injection
+// ----------------------------------------------------
+
+// Inject context menu handler into the page's main world
+const aiContextCode = `
+(function() {
+  let _lastContextTarget = null;
+
+  document.addEventListener('contextmenu', (e) => {
+    _lastContextTarget = e.target;
+  }, true);
+
+  window.__getAIContextInfo = function() {
+    const selected = window.getSelection().toString().trim();
+    const target = _lastContextTarget;
+    let imageData = null;
+    let imageSrc  = null;
+    let imageMime = 'image/png';
+
+    if (target && (target.tagName === 'IMG' || target.closest('img'))) {
+      const img = target.tagName === 'IMG' ? target : target.closest('img');
+      imageSrc = img.src;
+      imageMime = img.src.startsWith('data:') ? img.src.split(';')[0].split(':')[1] : 'image/png';
+    }
+
+    return { selected, imageSrc, imageMime };
+  };
+
+  window.__getImageAsBase64 = async function(src) {
+    try {
+      const res = await fetch(src);
+      const blob = await res.blob();
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(blob);
+      });
+    } catch { return null; }
+  };
+})();
+`;
+
+webFrame.executeJavaScript(aiContextCode);
+
+// Listen for context menu trigger from main process
+ipcRenderer.on('ai-context-menu-trigger', async (event, action) => {
+  try {
+    const info = await webFrame.executeJavaScript('window.__getAIContextInfo()');
+
+    if (action === 'analyse-image' && info.imageSrc) {
+      const base64 = await webFrame.executeJavaScript(
+        `window.__getImageAsBase64(${JSON.stringify(info.imageSrc)})`
+      );
+      if (base64) {
+        ipcRenderer.send('ai-tab-context-action', {
+          action: 'analyse-image',
+          imageData: base64,
+          mimeType: info.imageMime
+        });
+      }
+    } else if (info.selected) {
+      ipcRenderer.send('ai-tab-context-action', {
+        action,
+        text: info.selected
+      });
+    }
+  } catch(e) {
+    console.error('AI context menu error:', e);
+  }
+});
+
+// ----------------------------------------------------
+// Page Indexing for Semantic Search (after navigation)
+// ----------------------------------------------------
+window.addEventListener('load', () => {
+  // Small delay so page content has rendered
+  setTimeout(async () => {
+    try {
+      const text = document.body ? document.body.innerText.slice(0, 4000) : '';
+      if (text.length > 200) {
+        ipcRenderer.send('ai-index-page-from-tab', {
+          url: location.href,
+          title: document.title,
+          text
+        });
+      }
+    } catch {}
+  }, 2000);
+});

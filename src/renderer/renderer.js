@@ -67,6 +67,10 @@ let preferences = {};
 let recordingShortcutKey = null; // Stores action name when recording a shortcut
 let audioLoopbackStream = null;
 
+// Expose states dynamically to window for other panels (e.g. AI panel context)
+Object.defineProperty(window, '_tabs', { get: () => tabs, configurable: true });
+Object.defineProperty(window, '_activeTabId', { get: () => activeTabId, configurable: true });
+
 const SHORTCUT_NAMES = {
   'new-tab': 'New Tab',
   'close-tab': 'Close Tab',
@@ -785,17 +789,112 @@ btnMicRoutingToggle.addEventListener('click', () => {
 function updateLayout() {
   const topbar = document.getElementById('topbar');
   if (!topbar) return;
-  const height = topbar.offsetHeight;
+  
+  let height = topbar.offsetHeight;
+  if (height < 50) {
+    const bookmarksBar = document.getElementById('bookmarks-bar');
+    const isBookmarksVisible = bookmarksBar && !bookmarksBar.classList.contains('hidden');
+    height = isBookmarksVisible ? 138 : 104;
+  }
+  
+  document.documentElement.style.setProperty('--topbar-height', height + 'px');
   
   const isAudioRoutingOpen = audioRoutingPopover && !audioRoutingPopover.classList.contains('hidden');
-  const isSettingsOpen = !settingsPanel.classList.contains('hidden');
-  const isDownloadsOpen = !downloadsPanel.classList.contains('hidden');
-  const isBookmarksOpen = !bookmarksPanel.classList.contains('hidden');
+  const isSettingsOpen = settingsPanel && !settingsPanel.classList.contains('hidden');
+  const isDownloadsOpen = downloadsPanel && !downloadsPanel.classList.contains('hidden');
+  const isBookmarksOpen = bookmarksPanel && !bookmarksPanel.classList.contains('hidden');
   
-  const rightMargin = (isSettingsOpen || isDownloadsOpen || isBookmarksOpen || isAudioRoutingOpen) ? 380 : 0;
+  const aiPanel = document.getElementById('ai-panel');
+  const aiToolsPanel = document.getElementById('ai-tools-panel');
+  const aiHistoryPanel = document.getElementById('ai-history-panel');
+  const aiImagePanel = document.getElementById('ai-image-panel');
+  
+  const isAiOpen = aiPanel && aiPanel.classList.contains('open');
+  const isAiToolsOpen = aiToolsPanel && aiToolsPanel.classList.contains('open');
+  const isAiHistoryOpen = aiHistoryPanel && aiHistoryPanel.classList.contains('open');
+  const isAiImageOpen = aiImagePanel && aiImagePanel.classList.contains('open');
+  
+  let rightMargin = 0;
+  if (isAiImageOpen) {
+    rightMargin = aiImagePanel.offsetWidth || 480;
+  } else if (isAiHistoryOpen) {
+    rightMargin = aiHistoryPanel.offsetWidth || 480;
+  } else if (isAiToolsOpen) {
+    rightMargin = aiToolsPanel.offsetWidth || 480;
+  } else if (isAiOpen) {
+    rightMargin = aiPanel.offsetWidth || 380;
+  } else if (isSettingsOpen) {
+    rightMargin = settingsPanel.offsetWidth || 380;
+  } else if (isDownloadsOpen) {
+    rightMargin = downloadsPanel.offsetWidth || 380;
+  } else if (isBookmarksOpen) {
+    rightMargin = bookmarksPanel.offsetWidth || 380;
+  } else if (isAudioRoutingOpen) {
+    rightMargin = 380;
+  }
   
   window.electronAPI.updateLayoutMargins({ height, rightMargin });
 }
+
+function makePanelResizable(panel) {
+  if (!panel) return;
+  
+  // Prevent duplicate handles
+  if (panel.querySelector('.resize-handle')) return;
+  
+  const handle = document.createElement('div');
+  handle.className = 'resize-handle';
+  panel.appendChild(handle);
+
+  let startX = 0;
+  let startWidth = 0;
+
+  handle.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    startX = e.clientX;
+    startWidth = parseInt(document.defaultView.getComputedStyle(panel).width, 10);
+    handle.classList.add('resizing');
+    document.body.style.cursor = 'ew-resize';
+    document.body.style.userSelect = 'none';
+
+    function doDrag(dragEvent) {
+      // Pinned to right, so drag direction is opposite to clientX movement
+      const width = startWidth + (startX - dragEvent.clientX);
+      if (width >= 280 && width <= 800) {
+        panel.style.width = width + 'px';
+        updateLayout();
+      }
+    }
+
+    function stopDrag() {
+      handle.classList.remove('resizing');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', doDrag);
+      window.removeEventListener('mouseup', stopDrag);
+    }
+
+    window.addEventListener('mousemove', doDrag);
+    window.addEventListener('mouseup', stopDrag);
+  });
+}
+
+// Initialize panel drag resizes immediately
+setTimeout(() => {
+  const panelsToResize = [
+    settingsPanel,
+    downloadsPanel,
+    bookmarksPanel,
+    document.getElementById('ai-panel'),
+    document.getElementById('ai-tools-panel'),
+    document.getElementById('ai-history-panel'),
+    document.getElementById('ai-image-panel')
+  ];
+  panelsToResize.forEach(p => {
+    if (p) makePanelResizable(p);
+  });
+}, 100);
+
 
 // ----------------------------------------------------
 // Window Slide Panel Panel Toggles
@@ -1253,6 +1352,9 @@ async function init() {
   await loadPreferences();
   await loadBookmarks();
   await updateAudioRoutingUIForActiveTab();
+  if (window.aiAuth) {
+    await window.aiAuth.init();
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);

@@ -1,0 +1,106 @@
+// ============================================================
+// AI Request History Log Panel — DevilBrowser
+// ============================================================
+(function() {
+  'use strict';
+
+  const panel     = document.getElementById('ai-history-panel');
+  const tbody     = document.getElementById('ai-history-tbody');
+  const btnClose  = document.getElementById('ai-history-close');
+  const btnToggle = document.getElementById('btn-ai-history');
+  const filterStatus = document.getElementById('ai-history-filter-status');
+  const filterModel  = document.getElementById('ai-history-filter-model');
+  const paginationEl = document.getElementById('ai-history-pagination');
+
+  let currentSkip = 0;
+  const PAGE_SIZE = 20;
+
+  window.aiHistory = {
+    async open() {
+      const token = await window.electronAPI.aiGetToken();
+      if (!token) {
+        if (window.aiAuth) window.aiAuth.showModal();
+        return;
+      }
+      if (!panel) return;
+      panel.classList.add('open');
+      updateLayout();
+      await loadLogs(0);
+    },
+    close() {
+      if (!panel) return;
+      panel.classList.remove('open');
+      updateLayout();
+    }
+  };
+
+  function updateLayout() {
+    if (window.updateLayout) {
+      window.updateLayout();
+    }
+  }
+
+  async function loadLogs(skip) {
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="5" class="ai-history-loading">Loading...</td></tr>';
+    try {
+      const status = filterStatus ? filterStatus.value : '';
+      const model  = filterModel  ? filterModel.value  : '';
+      const res = await window.electronAPI.aiGetLogs({ limit: PAGE_SIZE, skip, status: status || undefined, model: model || undefined });
+      if (!res || !res.logs) {
+        tbody.innerHTML = '<tr><td colspan="5" class="ai-history-empty">No history available.</td></tr>';
+        return;
+      }
+      currentSkip = skip;
+      renderLogs(res.logs);
+      renderPagination(res.total, skip);
+    } catch(e) {
+      tbody.innerHTML = `<tr><td colspan="5" class="ai-history-empty">⚠️ ${e.message}</td></tr>`;
+    }
+  }
+
+  function renderLogs(logs) {
+    if (!tbody) return;
+    if (logs.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" class="ai-history-empty">No requests logged yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = '';
+    logs.forEach(log => {
+      const tr = document.createElement('tr');
+      const date = new Date(log.created_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+      const statusClass = log.status === 'success' ? 'success' : 'error';
+      const tokens = log.usage_metadata ? log.usage_metadata.totalTokenCount : '—';
+      tr.innerHTML = `
+        <td>${date}</td>
+        <td><code>${log.model || '—'}</code></td>
+        <td class="ai-log-prompt" title="${(log.prompt_length || 0) + ' chars'}">${log.prompt_length || 0} chars</td>
+        <td>${tokens}</td>
+        <td><span class="ai-log-status ${statusClass}">${log.status}</span><br><small>${log.latency_ms || 0}ms</small></td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderPagination(total, skip) {
+    if (!paginationEl) return;
+    const page = Math.floor(skip / PAGE_SIZE) + 1;
+    const pages = Math.ceil(total / PAGE_SIZE);
+    paginationEl.innerHTML = `
+      <button class="ai-page-btn" ${skip === 0 ? 'disabled' : ''} data-skip="${Math.max(0, skip - PAGE_SIZE)}">← Prev</button>
+      <span>Page ${page} of ${pages} (${total} total)</span>
+      <button class="ai-page-btn" ${skip + PAGE_SIZE >= total ? 'disabled' : ''} data-skip="${skip + PAGE_SIZE}">Next →</button>
+    `;
+    paginationEl.querySelectorAll('.ai-page-btn:not([disabled])').forEach(btn => {
+      btn.addEventListener('click', () => loadLogs(parseInt(btn.dataset.skip)));
+    });
+  }
+
+  if (btnClose)  btnClose.addEventListener('click', () => window.aiHistory.close());
+  if (btnToggle) btnToggle.addEventListener('click', () => {
+    panel && panel.classList.contains('open') ? window.aiHistory.close() : window.aiHistory.open();
+  });
+  if (filterStatus) filterStatus.addEventListener('change', () => loadLogs(0));
+  if (filterModel)  filterModel.addEventListener('change',  () => loadLogs(0));
+
+})();
