@@ -25,6 +25,7 @@ const btnBookmarksToggle = document.getElementById('btn-bookmarks-manager-toggle
 const bookmarksPanel = document.getElementById('bookmarks-panel');
 const bookmarksManagerList = document.getElementById('bookmarks-manager-list');
 const bookmarksSearchInput = document.getElementById('bookmarks-search-input');
+const toggleSemanticBookmarks = document.getElementById('toggle-semantic-bookmarks');
 const btnCloseBookmarks = document.getElementById('btn-close-bookmarks');
 const btnBookmarkPage = document.getElementById('btn-bookmark-page');
 
@@ -35,6 +36,8 @@ const btnCloseSettings = document.getElementById('btn-close-settings');
 const toggleContentProtection = document.getElementById('toggle-content-protection');
 const protectionStatusBadge = document.getElementById('protection-status-badge');
 const statusProtection = document.getElementById('status-protection');
+const toggleAdBlocker = document.getElementById('toggle-adblocker');
+const toggleAlwaysOnTop = document.getElementById('toggle-always-ontop');
 
 const selectVirtualDevice = document.getElementById('select-virtual-device');
 const btnEnableRouting = document.getElementById('btn-enable-routing');
@@ -55,6 +58,21 @@ const newTabPage = document.getElementById('new-tab-page');
 const newTabSearch = document.getElementById('new-tab-search');
 const currentTimeEl = document.getElementById('current-time');
 const loopbackAudio = document.getElementById('loopback-audio');
+
+const selectBrowserMode = document.getElementById('select-browser-mode');
+const accountEmail = document.getElementById('account-email');
+const accountPlan = document.getElementById('account-plan');
+const btnSignOut = document.getElementById('btn-sign-out');
+const valTabs = document.getElementById('val-tabs');
+const valSites = document.getElementById('val-sites');
+const valAds = document.getElementById('val-ads');
+const valSession = document.getElementById('val-session');
+
+const audioRoutingPopover = document.getElementById('audio-routing-popover');
+const popoverRouteEnable = document.getElementById('popover-route-enable');
+const popoverAudioSource = document.getElementById('popover-audio-source');
+const popoverAudioDest = document.getElementById('popover-audio-dest');
+const popoverStatusVal = document.getElementById('popover-status-val');
 
 // ----------------------------------------------------
 // Core Browser State
@@ -79,7 +97,10 @@ const SHORTCUT_NAMES = {
   'focus-address': 'Focus Address Bar',
   'new-window': 'New Window',
   'dev-tools': 'Developer Tools',
-  'add-bookmark': 'Toggle Bookmark'
+  'add-bookmark': 'Toggle Bookmark',
+  'toggle-adblocker': 'Toggle Ad Blocker',
+  'toggle-always-ontop': 'Toggle Always Active Window',
+  'toggle-window': 'Show/Hide Window (Global)'
 };
 
 // ----------------------------------------------------
@@ -255,12 +276,53 @@ function renderBookmarksBar() {
   });
 }
 
-function renderBookmarksManager() {
+async function renderBookmarksManager() {
   bookmarksManagerList.innerHTML = '';
-  const query = bookmarksSearchInput.value.toLowerCase().trim();
+  const query = bookmarksSearchInput.value.trim();
+
+  if (toggleSemanticBookmarks && toggleSemanticBookmarks.checked) {
+    if (!query) {
+      bookmarksManagerList.innerHTML = `<div class="no-bookmarks">Type a search phrase (e.g. "React layout tutorial") to search visited history pages semantically.</div>`;
+      return;
+    }
+    
+    bookmarksManagerList.innerHTML = `<div class="no-bookmarks">Searching semantic vector database...</div>`;
+    try {
+      const results = await window.electronAPI.aiSemanticSearch(query);
+      bookmarksManagerList.innerHTML = '';
+      if (!results || results.length === 0) {
+        bookmarksManagerList.innerHTML = `<div class="no-bookmarks">No matches found for "${query}"</div>`;
+        return;
+      }
+      
+      results.forEach(res => {
+        const card = document.createElement('div');
+        card.className = 'bookmark-manager-card semantic-card';
+        const scorePct = Math.round(res.score * 100);
+        card.innerHTML = `
+          <div class="bookmark-manager-info">
+            <span class="bookmark-manager-title">${res.title} <span class="similarity-badge">${scorePct}% Match</span></span>
+            <span class="bookmark-manager-url">${res.url}</span>
+            <span class="bookmark-manager-snippet">${res.snippet || ''}</span>
+          </div>
+        `;
+        card.addEventListener('click', () => {
+          handleNavigationSubmit(res.url);
+          bookmarksPanel.classList.add('hidden');
+        });
+        bookmarksManagerList.appendChild(card);
+      });
+    } catch (e) {
+      bookmarksManagerList.innerHTML = `<div class="no-bookmarks">⚠️ Error during semantic search: ${e.message}</div>`;
+    }
+    return;
+  }
+
+  // Standard keyword matching
+  const lowerQuery = query.toLowerCase();
   const filtered = bookmarks.filter(bm => 
-    bm.title.toLowerCase().includes(query) || 
-    bm.url.toLowerCase().includes(query)
+    bm.title.toLowerCase().includes(lowerQuery) || 
+    bm.url.toLowerCase().includes(lowerQuery)
   );
 
   if (filtered.length === 0) {
@@ -443,6 +505,24 @@ async function loadPreferences() {
   permNotifications.checked = preferences.permissions.notifications !== false;
   permGeolocation.checked = !!preferences.permissions.geolocation;
 
+  // Ad Blocker & Always On Top Checkboxes
+  if (toggleAdBlocker) {
+    toggleAdBlocker.checked = !!preferences.adBlockerEnabled;
+  }
+  if (toggleAlwaysOnTop) {
+    toggleAlwaysOnTop.checked = !!preferences.alwaysOnTopEnabled;
+  }
+
+  // Load Browser Mode
+  try {
+    const mode = await window.electronAPI.getBrowserMode();
+    if (selectBrowserMode) {
+      selectBrowserMode.value = mode || 'tray';
+    }
+  } catch (err) {
+    console.error('Failed to load browser mode:', err);
+  }
+
   // Shortcuts Rendering
   renderShortcuts();
 
@@ -492,6 +572,35 @@ toggleContentProtection.addEventListener('change', async (e) => {
     await window.electronAPI.savePreferences(preferences);
   });
 });
+
+if (toggleAdBlocker) {
+  toggleAdBlocker.addEventListener('change', async (e) => {
+    preferences.adBlockerEnabled = e.target.checked;
+    await window.electronAPI.savePreferences(preferences);
+    showToastNotification(`Ad Blocker: ${preferences.adBlockerEnabled ? 'Enabled' : 'Disabled'}`);
+  });
+}
+
+if (toggleAlwaysOnTop) {
+  toggleAlwaysOnTop.addEventListener('change', async (e) => {
+    preferences.alwaysOnTopEnabled = e.target.checked;
+    await window.electronAPI.savePreferences(preferences);
+    showToastNotification(`Always Active Window: ${preferences.alwaysOnTopEnabled ? 'Enabled' : 'Disabled'}`);
+  });
+}
+
+if (selectBrowserMode) {
+  selectBrowserMode.addEventListener('change', async (e) => {
+    const val = e.target.value;
+    const res = await window.electronAPI.setBrowserMode(val);
+    if (res.success) {
+      showToastNotification(`Browser Mode: ${val === 'tray' ? 'System Tray' : 'Taskbar'}`);
+    } else {
+      alert('Failed to set browser mode: ' + (res.error || 'unknown'));
+      selectBrowserMode.value = val === 'tray' ? 'taskbar' : 'tray';
+    }
+  });
+}
 
 // Clear browsing cache placeholder
 btnClearCache.addEventListener('click', () => {
@@ -580,7 +689,9 @@ btnResetShortcuts.addEventListener('click', async () => {
     'focus-address': 'Control+l',
     'new-window': 'Control+n',
     'dev-tools': 'Control+Shift+i',
-    'add-bookmark': 'Control+d'
+    'add-bookmark': 'Control+d',
+    'toggle-adblocker': 'Control+Shift+A',
+    'toggle-always-ontop': 'Control+Shift+P'
   };
   await window.electronAPI.savePreferences(preferences);
   renderShortcuts();
@@ -901,10 +1012,14 @@ setTimeout(() => {
 // ----------------------------------------------------
 
 btnSettings.addEventListener('click', () => {
+  const isOpening = settingsPanel.classList.contains('hidden');
   settingsPanel.classList.toggle('hidden');
   downloadsPanel.classList.add('hidden');
   bookmarksPanel.classList.add('hidden');
   audioRoutingPopover.classList.add('hidden');
+  if (isOpening) {
+    updateAccountUI();
+  }
   updateLayout();
 });
 btnCloseSettings.addEventListener('click', () => {
@@ -937,6 +1052,17 @@ btnCloseBookmarks.addEventListener('click', () => {
   bookmarksPanel.classList.add('hidden');
   updateLayout();
 });
+
+if (bookmarksSearchInput) {
+  bookmarksSearchInput.addEventListener('input', () => {
+    renderBookmarksManager();
+  });
+}
+if (toggleSemanticBookmarks) {
+  toggleSemanticBookmarks.addEventListener('change', () => {
+    renderBookmarksManager();
+  });
+}
 
 // ----------------------------------------------------
 // Background IPC Sync Listeners
@@ -971,6 +1097,7 @@ window.electronAPI.on('tab-activated', (data) => {
 
     if (data.url === 'about:blank') {
       newTabPage.classList.add('active');
+      updateStatsUI();
     } else {
       newTabPage.classList.remove('active');
     }
@@ -1104,11 +1231,6 @@ window.electronAPI.on('mic-routing-source-changed', async (source) => {
 });
 
 // Tab-Level Audio Input Routing & Popover Interactivity
-const audioRoutingPopover = document.getElementById('audio-routing-popover');
-const popoverRouteEnable = document.getElementById('popover-route-enable');
-const popoverAudioSource = document.getElementById('popover-audio-source');
-const popoverAudioDest = document.getElementById('popover-audio-dest');
-const popoverStatusVal = document.getElementById('popover-status-val');
 
 async function updateAudioRoutingUIForActiveTab() {
   if (!activeTabId) {
@@ -1251,6 +1373,18 @@ window.electronAPI.on('tab-audio-settings-changed', () => {
   updateAudioRoutingUIForActiveTab();
 });
 
+window.electronAPI.on('adblocker-state-changed', (enabled) => {
+  preferences.adBlockerEnabled = enabled;
+  if (toggleAdBlocker) toggleAdBlocker.checked = enabled;
+  showToastNotification(`Ad Blocker: ${enabled ? 'Enabled' : 'Disabled'}`);
+});
+
+window.electronAPI.on('always-ontop-state-changed', (enabled) => {
+  preferences.alwaysOnTopEnabled = enabled;
+  if (toggleAlwaysOnTop) toggleAlwaysOnTop.checked = enabled;
+  showToastNotification(`Always Active Window: ${enabled ? 'Enabled' : 'Disabled'}`);
+});
+
 // Toggle elements from shortcuts
 window.electronAPI.on('toggle-bookmarks-bar', () => {
   bookmarksBar.classList.toggle('hidden');
@@ -1333,6 +1467,9 @@ function initClock() {
   function updateClock() {
     const d = new Date();
     currentTimeEl.innerText = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (newTabPage && newTabPage.classList.contains('active')) {
+      updateStatsUI();
+    }
   }
   updateClock();
   setInterval(updateClock, 1000);
@@ -1346,12 +1483,93 @@ function watchTopbarHeight() {
   resizeObserver.observe(document.getElementById('topbar'));
 }
 
+async function updateAccountUI() {
+  if (!accountEmail || !accountPlan) return;
+  try {
+    const user = await window.electronAPI.aiGetMe();
+    if (user && user.email) {
+      accountEmail.innerText = user.email;
+      accountPlan.innerText = user.plan || 'Free';
+      const char = user.email.charAt(0).toUpperCase();
+      const avatarCharEl = document.getElementById('account-avatar-char');
+      if (avatarCharEl) avatarCharEl.innerText = char;
+      if (btnSignOut) btnSignOut.disabled = false;
+    } else {
+      accountEmail.innerText = 'Not Logged In';
+      accountPlan.innerText = 'Free';
+      const avatarCharEl = document.getElementById('account-avatar-char');
+      if (avatarCharEl) avatarCharEl.innerText = 'U';
+      if (btnSignOut) btnSignOut.disabled = true;
+    }
+  } catch (err) {
+    console.error('Failed to get account details:', err);
+    accountEmail.innerText = 'Not Logged In';
+    accountPlan.innerText = 'Free';
+    const avatarCharEl = document.getElementById('account-avatar-char');
+    if (avatarCharEl) avatarCharEl.innerText = 'U';
+    if (btnSignOut) btnSignOut.disabled = true;
+  }
+}
+
+async function updateStatsUI() {
+  try {
+    const stats = await window.electronAPI.getStats();
+    renderStatsData(stats);
+  } catch (err) {
+    console.error('Failed to get stats:', err);
+  }
+}
+
+function renderStatsData(stats) {
+  if (!stats) return;
+  if (valTabs) valTabs.innerText = stats.tabsOpenedToday || 0;
+  if (valSites) valSites.innerText = stats.sitesVisitedTodayCount || 0;
+  if (valAds) valAds.innerText = stats.adsBlockedToday || 0;
+  if (valSession) valSession.innerText = formatDuration(stats.sessionDuration || 0);
+}
+
+function formatDuration(ms) {
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  if (hours > 0) {
+    const mins = minutes % 60;
+    return `${hours}h ${mins}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m`;
+  }
+  return `${seconds}s`;
+}
+
+// Background stats updates listener
+window.electronAPI.on('stats-updated', (stats) => {
+  renderStatsData(stats);
+});
+
+// AI Account sign out listener
+if (btnSignOut) {
+  btnSignOut.addEventListener('click', async () => {
+    try {
+      await window.electronAPI.aiLogout();
+      // Dispatch ai-session-expired event so AI panel resets
+      window.dispatchEvent(new Event('ai-session-expired'));
+      await updateAccountUI();
+      showToastNotification('Signed out of AI Account');
+    } catch (err) {
+      console.error('Failed to sign out:', err);
+    }
+  });
+}
+
 async function init() {
   initClock();
   watchTopbarHeight();
   await loadPreferences();
   await loadBookmarks();
   await updateAudioRoutingUIForActiveTab();
+  await updateAccountUI();
+  await updateStatsUI();
   if (window.aiAuth) {
     await window.aiAuth.init();
   }

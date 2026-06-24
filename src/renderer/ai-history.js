@@ -12,6 +12,11 @@
   const filterModel  = document.getElementById('ai-history-filter-model');
   const paginationEl = document.getElementById('ai-history-pagination');
 
+  const analyticsTotal = document.getElementById('analytics-total');
+  const analyticsSuccessRate = document.getElementById('analytics-success-rate');
+  const analyticsAvgLatency = document.getElementById('analytics-avg-latency');
+  const analyticsTokens = document.getElementById('analytics-tokens');
+
   let currentSkip = 0;
   const PAGE_SIZE = 20;
 
@@ -25,6 +30,7 @@
       if (!panel) return;
       panel.classList.add('open');
       updateLayout();
+      await populateModelOptions();
       await loadLogs(0);
     },
     close() {
@@ -40,10 +46,79 @@
     }
   }
 
+  async function populateModelOptions() {
+    if (!filterModel) return;
+    try {
+      const res = await window.electronAPI.aiGetModels();
+      if (res && res.models) {
+        const currentVal = filterModel.value;
+        filterModel.innerHTML = '<option value="">All Models</option>';
+        res.models.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m;
+          opt.textContent = m;
+          filterModel.appendChild(opt);
+        });
+        filterModel.value = currentVal;
+      }
+    } catch (e) {}
+  }
+
+  async function updateTelemetry() {
+    try {
+      const res = await window.electronAPI.aiGetLogs({ limit: 100, skip: 0 });
+      if (res && res.logs) {
+        const logs = res.logs;
+        const total = logs.length;
+        if (total === 0) {
+          if (analyticsTotal) analyticsTotal.textContent = '0';
+          if (analyticsSuccessRate) analyticsSuccessRate.textContent = '0%';
+          if (analyticsAvgLatency) analyticsAvgLatency.textContent = '0ms';
+          if (analyticsTokens) analyticsTokens.textContent = '0';
+          return;
+        }
+
+        const successes = logs.filter(l => l.status === 'success');
+        const successRate = Math.round((successes.length / total) * 100);
+
+        let totalLatency = 0;
+        let latencyCount = 0;
+        let totalTokens = 0;
+
+        logs.forEach(l => {
+          if (l.latency_ms) {
+            totalLatency += l.latency_ms;
+            latencyCount++;
+          }
+          if (l.usage_metadata && l.usage_metadata.totalTokenCount) {
+            totalTokens += l.usage_metadata.totalTokenCount;
+          }
+        });
+
+        const avgLatency = latencyCount > 0 ? Math.round(totalLatency / latencyCount) : 0;
+        
+        let tokenStr = totalTokens.toString();
+        if (totalTokens >= 1000000) {
+          tokenStr = (totalTokens / 1000000).toFixed(1) + 'M';
+        } else if (totalTokens >= 1000) {
+          tokenStr = (totalTokens / 1000).toFixed(1) + 'k';
+        }
+
+        if (analyticsTotal) analyticsTotal.textContent = res.total;
+        if (analyticsSuccessRate) analyticsSuccessRate.textContent = `${successRate}%`;
+        if (analyticsAvgLatency) analyticsAvgLatency.textContent = `${avgLatency}ms`;
+        if (analyticsTokens) analyticsTokens.textContent = tokenStr;
+      }
+    } catch (err) {
+      console.error('Failed to update telemetry:', err);
+    }
+  }
+
   async function loadLogs(skip) {
     if (!tbody) return;
     tbody.innerHTML = '<tr><td colspan="5" class="ai-history-loading">Loading...</td></tr>';
     try {
+      await updateTelemetry();
       const status = filterStatus ? filterStatus.value : '';
       const model  = filterModel  ? filterModel.value  : '';
       const res = await window.electronAPI.aiGetLogs({ limit: PAGE_SIZE, skip, status: status || undefined, model: model || undefined });

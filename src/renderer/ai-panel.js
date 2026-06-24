@@ -19,6 +19,7 @@
   const btnSummarise = document.getElementById('ai-panel-summarise');
   const btnVoice = document.getElementById('ai-panel-voice');
   const btnThink = document.getElementById('ai-panel-think');
+  const btnScreenshot = document.getElementById('ai-panel-screenshot');
   const btnAiToggle = document.getElementById('btn-ai-toggle');
   const modelSelect = document.getElementById('ai-model-select');
   const sysInstrArea = document.getElementById('ai-system-instruction');
@@ -120,7 +121,12 @@
     if (btnAiToggle) btnAiToggle.classList.add('active');
     updatePageContext();
     updateLayout();
-    if (panelInput) panelInput.focus();
+    if (panelInput) {
+      // Small delay so the panel slide-in completes before focus
+      setTimeout(() => panelInput.focus(), 200);
+    }
+    // Reset message entrance counter when panel opens
+    msgIndex = 0;
   }
 
   function closePanel() {
@@ -151,27 +157,90 @@
   }
 
   // ------- Message Rendering -------
+  let msgIndex = 0;
+
   function appendMessage(role, text, streaming = false) {
     if (!panelMessages) return null;
     const msg = document.createElement('div');
     msg.className = `ai-msg ai-msg-${role}`;
+    // Staggered entrance delay for batched history renders
+    const delay = Math.min(msgIndex * 40, 300);
+    msg.style.animationDelay = `${delay}ms`;
+    msg.style.opacity = '0';
+    msgIndex++;
 
     const bubble = document.createElement('div');
     bubble.className = 'ai-bubble';
 
     if (role === 'model') {
+      // Model avatar
+      const avatarWrap = document.createElement('div');
+      avatarWrap.className = 'ai-msg-avatar';
+      avatarWrap.innerHTML = `<span class="ai-avatar-icon">✨</span>`;
+      msg.appendChild(avatarWrap);
+
       bubble.innerHTML = renderMarkdown(text);
       if (!streaming) {
         processCodeBlocks(bubble);
       }
-    } else {
+    } else if (role === 'user') {
       bubble.textContent = text;
+    } else {
+      bubble.innerHTML = `<span>${text}</span>`;
     }
 
     msg.appendChild(bubble);
+
+    // Timestamp
+    if (role === 'user' || role === 'model') {
+      const ts = document.createElement('span');
+      ts.className = 'ai-msg-ts';
+      const now = new Date();
+      ts.textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      msg.appendChild(ts);
+    }
+
     panelMessages.appendChild(msg);
-    panelMessages.scrollTop = panelMessages.scrollHeight;
+
+    // Trigger entrance animation
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        msg.style.opacity = '';
+        msg.classList.add('ai-msg-entered');
+      });
+    });
+
+    smoothScrollToBottom();
     return bubble;
+  }
+
+  function smoothScrollToBottom() {
+    if (!panelMessages) return;
+    panelMessages.scrollTo({ top: panelMessages.scrollHeight, behavior: 'smooth' });
+  }
+
+  // Typing indicator (three bouncing dots)
+  let typingIndicator = null;
+  function showTypingIndicator() {
+    if (typingIndicator) return;
+    typingIndicator = document.createElement('div');
+    typingIndicator.className = 'ai-msg ai-msg-model ai-typing-indicator-wrap';
+    typingIndicator.innerHTML = `
+      <div class="ai-msg-avatar"><span class="ai-avatar-icon">✨</span></div>
+      <div class="ai-typing-indicator">
+        <span></span><span></span><span></span>
+      </div>`;
+    panelMessages.appendChild(typingIndicator);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => typingIndicator.classList.add('ai-msg-entered'));
+    });
+    smoothScrollToBottom();
+  }
+  function hideTypingIndicator() {
+    if (typingIndicator) {
+      typingIndicator.remove();
+      typingIndicator = null;
+    }
   }
 
   function processCodeBlocks(bubble) {
@@ -235,22 +304,55 @@
 
   function renderMessages() {
     if (!panelMessages) return;
+    msgIndex = 0;
     panelMessages.innerHTML = '';
     if (history.length === 0) {
       panelMessages.innerHTML = `
         <div class="ai-welcome">
-          <div class="ai-welcome-icon">✨</div>
-          <p>Hi! I'm your CoatcardAi.<br>I can help you understand, summarise, or discuss anything on the web.</p>
+          <div class="ai-welcome-orb">
+            <div class="ai-welcome-orb-inner">✨</div>
+          </div>
+          <div class="ai-welcome-text">
+            <h3>CoatcardAi</h3>
+            <p>Your intelligent browsing co-pilot. I can browse, research, automate, and assist — all without leaving this tab.</p>
+          </div>
+          <div class="ai-welcome-suggestions">
+            <button class="ai-suggestion-card" data-prompt="Summarize this page for me">
+              <span class="suggestion-icon">📄</span>
+              <span class="suggestion-label">Summarize page</span>
+            </button>
+            <button class="ai-suggestion-card" data-prompt="What are the key points on this page?">
+              <span class="suggestion-icon">🔑</span>
+              <span class="suggestion-label">Key points</span>
+            </button>
+            <button class="ai-suggestion-card" data-prompt="Search Google for the latest AI news">
+              <span class="suggestion-icon">🔍</span>
+              <span class="suggestion-label">Web research</span>
+            </button>
+            <button class="ai-suggestion-card" data-prompt="Open YouTube and find a tutorial about React hooks">
+              <span class="suggestion-icon">🤖</span>
+              <span class="suggestion-label">Auto-browse</span>
+            </button>
+          </div>
           <div class="ai-welcome-tips">
-            <span>💡 Select text on any page → right-click → AI actions</span>
+            <span>💡 Select text → right-click → AI actions</span>
             <span>🖼️ Right-click images to analyse them</span>
             <span>📄 Type <code>ai:</code> in the address bar</span>
           </div>
         </div>`;
+
+      // Wire suggestion cards
+      panelMessages.querySelectorAll('.ai-suggestion-card').forEach(btn => {
+        btn.addEventListener('click', () => {
+          if (panelInput) panelInput.value = btn.dataset.prompt;
+          sendMessage();
+        });
+      });
       return;
     }
     history.forEach(h => appendMessage(h.role, h.text));
   }
+
 
   // Simple markdown → HTML (bold, code, lists, newlines)
   function renderMarkdown(text) {
@@ -381,6 +483,7 @@
   function getStreamResponse(displayPrompt, apiPrompt, systemInstruction, imageData, imageMimeType) {
     return new Promise((resolve, reject) => {
       isStreaming = true;
+      updateSendBtnState(true);
 
       let loadingBubble = null;
       if (displayPrompt) {
@@ -388,28 +491,41 @@
         history.push({ role: 'user', text: displayPrompt });
       }
 
-      loadingBubble = appendMessage('model', '⠋ Thinking…');
-      if (loadingBubble) loadingBubble.classList.add('streaming');
+      // Show typing indicator first
+      showTypingIndicator();
 
       const model = modelSelect ? modelSelect.value : undefined;
       const thinking = thinkMode ? 8192 : 0;
 
       let fullText = '';
+      let firstChunk = true;
 
       const onChunk = (text) => {
         fullText += text;
+        if (firstChunk) {
+          firstChunk = false;
+          // Replace typing indicator with actual streaming bubble
+          hideTypingIndicator();
+          loadingBubble = appendMessage('model', '');
+          if (loadingBubble) loadingBubble.classList.add('streaming');
+        }
         if (loadingBubble) {
           loadingBubble.innerHTML = renderMarkdown(fullText) + '<span class="ai-cursor">▍</span>';
-          panelMessages.scrollTop = panelMessages.scrollHeight;
+          smoothScrollToBottom();
         }
       };
 
       const onDone = () => {
         isStreaming = false;
+        updateSendBtnState(false);
+        hideTypingIndicator();
         if (loadingBubble) {
           loadingBubble.classList.remove('streaming');
           loadingBubble.innerHTML = renderMarkdown(fullText);
           processCodeBlocks(loadingBubble);
+        } else if (!fullText) {
+          // Empty response with no chunks at all
+          appendMessage('system', '⚠️ Empty response received.');
         }
         history.push({ role: 'model', text: fullText });
         window.aiQuota.refresh();
@@ -420,9 +536,13 @@
 
       const onError = (err) => {
         isStreaming = false;
+        updateSendBtnState(false);
+        hideTypingIndicator();
         if (loadingBubble) {
           loadingBubble.classList.remove('streaming');
           loadingBubble.innerHTML = `<span class="ai-error">⚠️ ${err || 'Generation failed'}</span>`;
+        } else {
+          appendMessage('system', `⚠️ ${err || 'Generation failed'}`);
         }
         if (displayPrompt) history.pop();
         window.electronAPI.offAiStream(onChunk, onDone, onError);
@@ -798,6 +918,13 @@
             } else {
               throw new Error(res.error);
             }
+          } else if (command === 'batch-generate') {
+            const prompts = params?.prompts;
+            const sysIns = params?.systemInstruction;
+            if (!prompts || !Array.isArray(prompts)) throw new Error("Missing prompts array parameter");
+            const res = await window.electronAPI.aiBatchGenerate({ prompts, systemInstruction: sysIns });
+            if (res.error) throw new Error(res.error);
+            executionResult = { success: true, result: res.results };
           } else if (command === 'set-memory') {
             const key = params?.key;
             const value = params?.value;
@@ -874,6 +1001,20 @@
     }
   }
 
+  // ------- Send Button State -------
+  function updateSendBtnState(loading) {
+    if (!btnSend) return;
+    if (loading) {
+      btnSend.classList.add('loading');
+      btnSend.disabled = true;
+      btnSend.innerHTML = `<svg class="spin-icon" viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>`;
+    } else {
+      btnSend.classList.remove('loading');
+      btnSend.disabled = false;
+      btnSend.innerHTML = `➤`;
+    }
+  }
+
   // ------- Send Message -------
   async function sendMessage() {
     if (!panelInput) return;
@@ -882,6 +1023,9 @@
 
     panelInput.value = '';
     panelInput.style.height = 'auto';
+    // Update char counter
+    const charCount = document.getElementById('ai-input-char-count');
+    if (charCount) charCount.textContent = '';
 
     await runAgentLoop(text);
   }
@@ -970,6 +1114,23 @@
   if (btnSummarise) btnSummarise.addEventListener('click', summarisePage);
   if (btnVoice) btnVoice.addEventListener('click', toggleListening);
   if (btnThink) btnThink.addEventListener('click', toggleThink);
+  if (btnScreenshot) {
+    btnScreenshot.addEventListener('click', async () => {
+      const token = await window.electronAPI.aiGetToken();
+      if (!token) {
+        if (window.aiAuth) window.aiAuth.showModal();
+        return;
+      }
+      appendMessage('user', '📸 Capturing tab screenshot...');
+      const res = await window.electronAPI.aiGetPageScreenshot();
+      if (res && res.base64) {
+        appendMessage('user', '📸 Screenshot captured! Analysing page content...');
+        await streamGenerate('Analyze this screenshot. What visual elements or text are shown? Summarize the main message or information of this image.', null, res.base64, res.mimeType);
+      } else {
+        appendMessage('system', '⚠️ Failed to capture screenshot: ' + (res.error || 'unknown error'));
+      }
+    });
+  }
   if (btnAiToggle) btnAiToggle.addEventListener('click', () => window.aiPanel.toggle());
 
   if (panelInput) {
@@ -982,6 +1143,24 @@
     panelInput.addEventListener('input', () => {
       panelInput.style.height = 'auto';
       panelInput.style.height = Math.min(panelInput.scrollHeight, 160) + 'px';
+      // Character count display
+      const charCount = document.getElementById('ai-input-char-count');
+      const len = panelInput.value.length;
+      if (charCount) {
+        charCount.textContent = len > 20 ? `${len}` : '';
+        charCount.classList.toggle('warn', len > 800);
+      }
+      // Show/hide send button based on content
+      if (btnSend) {
+        btnSend.style.opacity = len > 0 ? '1' : '0.5';
+        btnSend.style.transform = len > 0 ? 'scale(1)' : 'scale(0.92)';
+      }
+    });
+    panelInput.addEventListener('focus', () => {
+      panelInput.closest('.ai-input-area')?.classList.add('focused');
+    });
+    panelInput.addEventListener('blur', () => {
+      panelInput.closest('.ai-input-area')?.classList.remove('focused');
     });
   }
 

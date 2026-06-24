@@ -223,6 +223,38 @@
             <input type="text" id="new-tab-search" placeholder="Search Google or type a URL" />
           </div>
 
+          <!-- Stats Dashboard Grid -->
+          <div id="new-tab-stats" class="new-tab-stats-grid">
+            <div class="stat-card" id="stat-tabs" title="Total browser tabs opened today">
+              <div class="stat-icon">🗂️</div>
+              <div class="stat-info">
+                <span class="stat-value" id="val-tabs">0</span>
+                <span class="stat-label">Tabs Today</span>
+              </div>
+            </div>
+            <div class="stat-card" id="stat-sites" title="Unique domains navigated to today">
+              <div class="stat-icon">🌐</div>
+              <div class="stat-info">
+                <span class="stat-value" id="val-sites">0</span>
+                <span class="stat-label">Domains Visited</span>
+              </div>
+            </div>
+            <div class="stat-card" id="stat-ads" title="Total advertisements and trackers blocked today">
+              <div class="stat-icon">🛡️</div>
+              <div class="stat-info">
+                <span class="stat-value" id="val-ads">0</span>
+                <span class="stat-label">Ads Blocked</span>
+              </div>
+            </div>
+            <div class="stat-card" id="stat-session" title="Duration of the current browser session">
+              <div class="stat-icon">⏱️</div>
+              <div class="stat-info">
+                <span class="stat-value" id="val-session">0m</span>
+                <span class="stat-label">Session Active</span>
+              </div>
+            </div>
+          </div>
+
           <div class="quick-links">
             <a class="quick-link-item" href="https://www.google.com">
               <div class="icon-wrap">G</div>
@@ -273,6 +305,30 @@
 
       <div class="panel-body">
 
+        <!-- Account Section -->
+        <section class="settings-section settings-account-section">
+          <h3>Account</h3>
+          <p class="section-description">Manage your AI account and browser session.</p>
+          <div class="account-card" id="account-info-container">
+            <div class="account-avatar-placeholder">
+              <span id="account-avatar-char">U</span>
+            </div>
+            <div class="account-details">
+              <span id="account-email" class="account-email-chip">Not Logged In</span>
+              <span id="account-plan" class="account-plan-badge">Free</span>
+            </div>
+          </div>
+          <div class="setting-row">
+            <button id="btn-sign-out" class="danger-btn-outline">
+              <svg viewBox="0 0 24 24" width="14" height="14" style="margin-right: 6px;">
+                <path fill="currentColor"
+                  d="M14.08 15.59L16.67 13H7v-2h9.67l-2.59-2.59L15.5 7l5 5-5 5-1.42-1.41M19 3a2 2 0 0 1 2 2v2h-2V5H5v14h14v-2h2v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14z" />
+              </svg>
+              Sign Out
+            </button>
+          </div>
+        </section>
+
         <!-- Content Protection Section -->
         <section class="settings-section">
           <h3>Content Protection</h3>
@@ -287,6 +343,33 @@
               <input type="checkbox" id="toggle-content-protection">
               <span class="slider"></span>
             </label>
+          </div>
+        </section>
+
+        <!-- Browser Features Section -->
+        <section class="settings-section">
+          <h3>Browser Features</h3>
+          <p class="section-description">Configure ad blocking and window behaviors.</p>
+          <div class="setting-row">
+            <span class="setting-title">Enable Ad Blocker</span>
+            <label class="switch">
+              <input type="checkbox" id="toggle-adblocker">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="setting-row">
+            <span class="setting-title">Always Active Window (Always on Top)</span>
+            <label class="switch">
+              <input type="checkbox" id="toggle-always-ontop">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="setting-row">
+            <span class="setting-title">Browser Mode</span>
+            <select id="select-browser-mode" class="settings-select">
+              <option value="tray">System Tray (Background)</option>
+              <option value="taskbar">Taskbar (Normal App)</option>
+            </select>
           </div>
         </section>
 
@@ -414,6 +497,10 @@
       <div class="panel-body">
         <div class="bookmarks-search-container">
           <input type="text" id="bookmarks-search-input" placeholder="Search saved bookmarks..." />
+          <label class="semantic-search-toggle-label">
+            <input type="checkbox" id="toggle-semantic-bookmarks">
+            <span>AI Semantic Search</span>
+          </label>
         </div>
         <div id="bookmarks-manager-list">
           <!-- Bookmarks list -->
@@ -451,13 +538,6 @@
         <span id="ai-quota-text" class="ai-quota-label">Loading quota...</span>
       </div>
 
-      <!-- Action bar -->
-      <div class="ai-action-bar">
-        <button id="ai-panel-summarise" class="ai-action-chip" title="Summarise current page">📄 Summarise</button>
-        <button id="ai-panel-think" class="ai-action-chip" title="Deep Think mode">🧠 Deep Think</button>
-        <button id="ai-panel-voice" class="ai-action-chip" title="Voice input">🎙️ Voice</button>
-      </div>
-
       <!-- Model selector + system instruction -->
       <details class="ai-advanced-section">
         <summary>⚙️ Advanced</summary>
@@ -475,11 +555,23 @@
 
       <!-- Input area -->
       <div class="ai-input-area">
-        <textarea id="ai-panel-input" class="ai-input" placeholder="Ask anything about this page..."
-          rows="1"></textarea>
+        <div class="ai-input-wrapper">
+          <textarea id="ai-panel-input" class="ai-input" placeholder="Ask anything, browse the web, automate tasks..."
+            rows="1"></textarea>
+          <span id="ai-input-char-count" class="ai-input-char-count"></span>
+        </div>
         <div class="ai-input-buttons">
-          <button id="ai-panel-clear" class="ai-icon-btn" title="Clear chat">🗑️</button>
-          <button id="ai-panel-send" class="ai-send-btn" title="Send (Enter)">➤</button>
+          <button id="ai-panel-clear" class="ai-icon-btn" title="Clear chat (Ctrl+L)">
+            <svg viewBox="0 0 24 24" width="14" height="14">
+              <path fill="currentColor"
+                d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM8 9h8v10H8V9zm7.5-5l-1-1h-5l-1 1H5v2h14V4z" />
+            </svg>
+          </button>
+          <button id="ai-panel-send" class="ai-send-btn" title="Send (Enter)">
+            <svg viewBox="0 0 24 24" width="16" height="16">
+              <path fill="currentColor" d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+            </svg>
+          </button>
         </div>
       </div>
     </div>
@@ -540,6 +632,27 @@
         <div class="ai-panel-title">📜 AI Request History</div>
         <button id="ai-history-close" class="ai-icon-btn">✕</button>
       </div>
+
+      <!-- Telemetry Dashboard Row -->
+      <div id="ai-history-dashboard" class="ai-history-dashboard">
+        <div class="analytics-card">
+          <div class="analytics-label">Total Requests</div>
+          <div id="analytics-total" class="analytics-value">—</div>
+        </div>
+        <div class="analytics-card">
+          <div class="analytics-label">Success Rate</div>
+          <div id="analytics-success-rate" class="analytics-value">—</div>
+        </div>
+        <div class="analytics-card">
+          <div class="analytics-label">Avg Latency</div>
+          <div id="analytics-avg-latency" class="analytics-value">—</div>
+        </div>
+        <div class="analytics-card">
+          <div class="analytics-label">Tokens Used</div>
+          <div id="analytics-tokens" class="analytics-value">—</div>
+        </div>
+      </div>
+
       <div class="ai-history-filters">
         <select id="ai-history-filter-status" class="ai-select-sm">
           <option value="">All Status</option>

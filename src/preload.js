@@ -17,7 +17,10 @@ const SAFE_CHANNELS = [
   'shortcut-toggle-routing',
   'shortcut-cycle-source',
   'shortcut-toggle-mix',
-  'tab-audio-settings-changed'
+  'tab-audio-settings-changed',
+  'adblocker-state-changed',
+  'always-ontop-state-changed',
+  'stats-updated'
 ];
 
 const AI_SAFE_CHANNELS = [
@@ -47,6 +50,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setContentProtection: (enabled) => ipcRenderer.invoke('set-content-protection', enabled),
   getPreferences: () => ipcRenderer.invoke('get-preferences'),
   savePreferences: (prefs) => ipcRenderer.invoke('save-preferences', prefs),
+  setBrowserMode: (mode) => ipcRenderer.invoke('set-browser-mode', mode),
+  getBrowserMode: () => ipcRenderer.invoke('get-browser-mode'),
+  getStats: () => ipcRenderer.invoke('get-stats'),
   
   // Audio Routing
   getDesktopAudioSourceId: () => ipcRenderer.invoke('get-desktop-audio-source-id'),
@@ -91,6 +97,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   aiSaveState: () => ipcRenderer.invoke('ai-save-state'),
   aiRestoreState: () => ipcRenderer.invoke('ai-restore-state'),
   aiDownloadFile: (url) => ipcRenderer.invoke('ai-download-file', url),
+  aiBatchGenerate: (payload) => ipcRenderer.invoke('ai-batch-generate', payload),
 
   // ── AI Tools Marketplace ──
   aiGetTools:     () => ipcRenderer.invoke('ai-get-tools'),

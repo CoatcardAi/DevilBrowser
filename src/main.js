@@ -5,6 +5,62 @@ const { execFile } = require('child_process');
 
 const store = new Store({ name: 'user-preferences' });
 
+let adBlockerEnabled = store.get('adBlockerEnabled', false);
+let alwaysOnTopEnabled = store.get('alwaysOnTopEnabled', false);
+let browserMode = store.get('browserMode', 'tray'); // 'tray' | 'taskbar'
+
+// Daily stats tracking and daily reset logic
+const today = new Date().toDateString();
+let statsDate = store.get('statsDate', today);
+let adsBlockedToday = 0;
+let tabsOpenedToday = 0;
+let sitesVisitedToday = [];
+
+if (statsDate !== today) {
+  store.set('statsDate', today);
+  store.set('adsBlockedToday', 0);
+  store.set('tabsOpenedToday', 0);
+  store.set('sitesVisitedToday', []);
+} else {
+  adsBlockedToday = store.get('adsBlockedToday', 0);
+  tabsOpenedToday = store.get('tabsOpenedToday', 0);
+  sitesVisitedToday = store.get('sitesVisitedToday', []);
+}
+const sessionStart = Date.now();
+
+function broadcastStats() {
+  const stats = {
+    adsBlockedToday,
+    tabsOpenedToday,
+    sitesVisitedTodayCount: Array.isArray(sitesVisitedToday) ? sitesVisitedToday.length : 0,
+    sessionDuration: Date.now() - sessionStart
+  };
+  for (const entry of windows.values()) {
+    try {
+      entry.win.webContents.send('stats-updated', stats);
+    } catch (e) {}
+  }
+}
+
+const AD_PATTERNS = [
+  'doubleclick.net',
+  'googleadservices.com',
+  'googlesyndication.com',
+  'adservice.google.com',
+  'taboola.com',
+  'outbrain.com',
+  'adnxs.com',
+  'amazon-adsystem.com',
+  'popads.net',
+  'adform.net',
+  'scorecardresearch.com',
+  'quantserve.com',
+  'google-analytics.com',
+  'hotjar.com',
+  'mixpanel.com',
+  'segment.io'
+];
+
 // Track open windows and their state
 // Key: window ID, Value: { win, tabs: [], activeTabId: null, closedTabsHistory: [], toolbarHeight: 86 }
 const windows = new Map();
@@ -132,6 +188,30 @@ function toggleWindowVisibility() {
   }
 }
 
+function registerGlobalToggleShortcut() {
+  const shortcuts = store.get('shortcuts', {});
+  const toggleShortcut = shortcuts['toggle-window'] || 'Control+B';
+  
+  try {
+    globalShortcut.unregisterAll();
+  } catch (e) {
+    console.error('Failed to unregister shortcuts:', e);
+  }
+  
+  try {
+    globalShortcut.register(toggleShortcut, () => {
+      toggleWindowVisibility();
+    });
+  } catch (e) {
+    console.error(`Failed to register global shortcut ${toggleShortcut}:`, e);
+    try {
+      globalShortcut.register('Control+B', () => {
+        toggleWindowVisibility();
+      });
+    } catch (e2) {}
+  }
+}
+
 function createTray() {
   const icon = nativeImage.createFromDataURL('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAY0lEQVQ4T2NkoAL8h1L/GZGFiTEKGHUAMeyH2sDKgCxgZMAD0A0gC/xHw8A/VIxRwGgC/0EWsDLgAegGkAX+o2HgHyrGKEAsA0gG/mNgoAFg9CChgFEHEMN+qA0wA1iwiOIBAPyRKiEs/f6FAAAAAElFTkSuQmCC');
   tray = new Tray(icon);
@@ -180,7 +260,7 @@ function createMainWindow(isIncognito = false) {
     minWidth: 800,
     minHeight: 600,
     show: false,
-    skipTaskbar: true,
+    skipTaskbar: browserMode === 'tray',
     titleBarStyle: useFrameless ? 'hidden' : 'default',
     titleBarOverlay: useFrameless ? {
       color: '#0b0f19',
@@ -215,15 +295,25 @@ function createMainWindow(isIncognito = false) {
     console.error('Failed to set content protection:', e);
   }
 
+  // Apply saved always on top preference on startup (default false)
+  const alwaysOnTop = store.get('alwaysOnTopEnabled', false);
+  try {
+    win.setAlwaysOnTop(alwaysOnTop);
+  } catch (e) {
+    console.error('Failed to set always on top:', e);
+  }
+
   win.once('ready-to-show', () => {
     win.show();
   });
 
   win.on('close', (event) => {
     if (!app.isQuitting) {
-      event.preventDefault();
-      win.minimize();
-      win.hide();
+      if (browserMode === 'tray') {
+        event.preventDefault();
+        win.minimize();
+        win.hide();
+      }
     }
   });
 
@@ -292,6 +382,12 @@ function createTab(winId, url) {
   if (!data) return null;
 
   const tabId = Date.now().toString() + Math.random().toString(36).substr(2, 5);
+  
+  // Track tabs opened today
+  tabsOpenedToday++;
+  store.set('tabsOpenedToday', tabsOpenedToday);
+  broadcastStats();
+
   const view = new BrowserView({
     webPreferences: {
       preload: path.join(__dirname, 'tab-preload.js'),
@@ -346,6 +442,19 @@ function createTab(winId, url) {
     tabEntry.url = currentUrl;
     tabEntry.canGoBack = view.webContents.canGoBack();
     tabEntry.canGoForward = view.webContents.canGoForward();
+    
+    try {
+      if (currentUrl && currentUrl !== 'about:blank' && !currentUrl.startsWith('chrome-error://')) {
+        const domain = new URL(currentUrl).hostname.toLowerCase();
+        if (domain && !sitesVisitedToday.includes(domain)) {
+          sitesVisitedToday.push(domain);
+          store.set('sitesVisitedToday', sitesVisitedToday);
+          broadcastStats();
+        }
+      }
+    } catch (e) {
+      console.error('Failed to parse domain for stats:', e);
+    }
     
     updateActiveViewBounds(winId);
 
@@ -677,7 +786,10 @@ function handleShortcutAction(winEntry, accelerator) {
     'focus-address': 'Control+l',
     'new-window': 'Control+n',
     'dev-tools': 'Control+Shift+i',
-    'add-bookmark': 'Control+d'
+    'add-bookmark': 'Control+d',
+    'toggle-adblocker': 'Control+Shift+A',
+    'toggle-always-ontop': 'Control+Shift+P',
+    'toggle-window': 'Control+B'
   });
   
   const action = Object.keys(shortcuts).find(key => {
@@ -724,6 +836,21 @@ function handleShortcutAction(winEntry, accelerator) {
     case 'add-bookmark':
       winEntry.win.webContents.send('trigger-bookmark');
       break;
+    case 'toggle-adblocker': {
+      const state = !store.get('adBlockerEnabled', false);
+      store.set('adBlockerEnabled', state);
+      adBlockerEnabled = state;
+      winEntry.win.webContents.send('adblocker-state-changed', state);
+      break;
+    }
+    case 'toggle-always-ontop': {
+      const state = !store.get('alwaysOnTopEnabled', false);
+      store.set('alwaysOnTopEnabled', state);
+      alwaysOnTopEnabled = state;
+      updateAlwaysOnTopState(state);
+      winEntry.win.webContents.send('always-ontop-state-changed', state);
+      break;
+    }
     default:
       return false;
   }
@@ -847,6 +974,8 @@ ipcMain.handle('set-content-protection', (e, enabled) => {
 
 ipcMain.handle('get-preferences', () => ({
   contentProtection: store.get('contentProtection', true),
+  adBlockerEnabled: store.get('adBlockerEnabled', false),
+  alwaysOnTopEnabled: store.get('alwaysOnTopEnabled', false),
   shortcuts: store.get('shortcuts', {
     'new-tab': 'Control+t',
     'close-tab': 'Control+w',
@@ -855,7 +984,10 @@ ipcMain.handle('get-preferences', () => ({
     'focus-address': 'Control+l',
     'new-window': 'Control+n',
     'dev-tools': 'Control+Shift+i',
-    'add-bookmark': 'Control+d'
+    'add-bookmark': 'Control+d',
+    'toggle-adblocker': 'Control+Shift+A',
+    'toggle-always-ontop': 'Control+Shift+P',
+    'toggle-window': 'Control+B'
   }),
   permissions: store.get('permissions', {
     media: true,
@@ -866,9 +998,64 @@ ipcMain.handle('get-preferences', () => ({
 }));
 
 ipcMain.handle('save-preferences', (e, prefs) => {
-  if (prefs.shortcuts) store.set('shortcuts', prefs.shortcuts);
+  if (prefs.shortcuts) {
+    store.set('shortcuts', prefs.shortcuts);
+    registerGlobalToggleShortcut();
+  }
   if (prefs.permissions) store.set('permissions', prefs.permissions);
+  if (prefs.contentProtection !== undefined) store.set('contentProtection', prefs.contentProtection);
+  if (prefs.adBlockerEnabled !== undefined) {
+    store.set('adBlockerEnabled', prefs.adBlockerEnabled);
+    adBlockerEnabled = prefs.adBlockerEnabled;
+  }
+  if (prefs.alwaysOnTopEnabled !== undefined) {
+    store.set('alwaysOnTopEnabled', prefs.alwaysOnTopEnabled);
+    alwaysOnTopEnabled = prefs.alwaysOnTopEnabled;
+    updateAlwaysOnTopState(prefs.alwaysOnTopEnabled);
+  }
   return { success: true };
+});
+
+ipcMain.handle('set-browser-mode', (e, mode) => {
+  if (mode !== 'tray' && mode !== 'taskbar') return { success: false, error: 'Invalid mode' };
+  browserMode = mode;
+  store.set('browserMode', mode);
+
+  // Update skipTaskbar on all open windows
+  for (const entry of windows.values()) {
+    try {
+      entry.win.setSkipTaskbar(mode === 'tray');
+    } catch (err) {
+      console.error('Failed to set skipTaskbar:', err);
+    }
+  }
+
+  // Handle tray destruction/creation
+  if (mode === 'taskbar') {
+    if (tray) {
+      tray.destroy();
+      tray = null;
+    }
+  } else {
+    if (!tray) {
+      createTray();
+    }
+  }
+
+  return { success: true, mode };
+});
+
+ipcMain.handle('get-browser-mode', () => {
+  return browserMode;
+});
+
+ipcMain.handle('get-stats', () => {
+  return {
+    adsBlockedToday,
+    tabsOpenedToday,
+    sitesVisitedTodayCount: Array.isArray(sitesVisitedToday) ? sitesVisitedToday.length : 0,
+    sessionDuration: Date.now() - sessionStart
+  };
 });
 
 // Bookmarks Handling
@@ -1630,11 +1817,116 @@ ipcMain.on('ai-index-page-from-tab', async (e, { url, title, text }) => {
   } catch {}
 });
 
+ipcMain.handle('ai-get-page-screenshot', async (e) => {
+  let activeTab = null;
+  for (const entry of windows.values()) {
+    activeTab = entry.tabs.find(t => t.id === entry.activeTabId);
+    if (activeTab) break;
+  }
+
+  if (!activeTab || !activeTab.view) {
+    return { error: 'No active tab view found' };
+  }
+
+  try {
+    const image = await activeTab.view.webContents.capturePage();
+    return { base64: image.toPNG().toString('base64'), mimeType: 'image/png' };
+  } catch (err) {
+    return { error: err.message };
+  }
+});
+
+ipcMain.handle('ai-batch-generate', async (e, { prompts, systemInstruction }) => {
+  const token = store.get('ai-token');
+  if (!token) return { error: 'Not authenticated' };
+
+  try {
+    const requests = prompts.map(p => ({ prompt: p }));
+    const submitRes = await aiFetch('POST', '/v1/generate/batch', { requests, systemInstruction }, token);
+    
+    if (!submitRes.body || !submitRes.body.batchId) {
+      return { error: 'Failed to submit batch: ' + JSON.stringify(submitRes.body) };
+    }
+
+    const batchId = submitRes.body.batchId;
+    console.log(`[Batch AI] Submitted batch ${batchId}. Polling queue...`);
+
+    const maxPolls = 60; // 2 minutes max
+    for (let i = 0; i < maxPolls; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      const pollRes = await aiFetch('GET', `/v1/queue/batch/${batchId}`, null, token);
+      
+      if (!pollRes.body) continue;
+      
+      const status = pollRes.body.status;
+      if (status === 'completed') {
+        return { success: true, results: pollRes.body.results };
+      } else if (status === 'failed') {
+        return { error: 'Batch execution failed on server' };
+      }
+      
+      console.log(`[Batch AI] Batch ${batchId} status: ${status} (${pollRes.body.completed_requests}/${pollRes.body.total_requests})`);
+    }
+
+    return { error: 'Batch request timed out' };
+  } catch (err) {
+    return { error: err.message };
+  }
+});
+
 // ----------------------------------------------------
 // App Lifecycle
 // ----------------------------------------------------
 
+function setupAdBlocker() {
+  session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
+    if (!adBlockerEnabled) {
+      callback({ cancel: false });
+      return;
+    }
+
+    try {
+      const url = new URL(details.url);
+      const host = url.hostname.toLowerCase();
+      const path = url.pathname.toLowerCase();
+
+      // Check hosts
+      const isAdHost = AD_PATTERNS.some(domain => host.includes(domain));
+      // Check for common ad script patterns in path
+      const isAdPath = path.includes('/ads.js') || 
+                       path.includes('/adsbygoogle') || 
+                       path.includes('/adframe') || 
+                       path.includes('google-analytics');
+
+      if (isAdHost || isAdPath) {
+        console.log(`[AdBlocker] Blocked request to: ${details.url}`);
+        adsBlockedToday++;
+        store.set('adsBlockedToday', adsBlockedToday);
+        broadcastStats();
+        callback({ cancel: true });
+        return;
+      }
+    } catch (e) {
+      // ignore invalid URLs
+    }
+
+    callback({ cancel: false });
+  });
+}
+
+function updateAlwaysOnTopState(enabled) {
+  BrowserWindow.getAllWindows().forEach(w => {
+    try {
+      w.setAlwaysOnTop(enabled);
+    } catch (e) {
+      console.error('Failed to set always on top:', e);
+    }
+  });
+}
+
 app.whenReady().then(() => {
+  setupAdBlocker();
+  
   // Content security sharing policies
   session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
     // Find if the webContents that sent the request is a main window
@@ -1794,10 +2086,10 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(menu);
 
   // Initialize System Tray and Global Shortcut
-  createTray();
-  globalShortcut.register('CommandOrControl+B', () => {
-    toggleWindowVisibility();
-  });
+  if (browserMode === 'tray') {
+    createTray();
+  }
+  registerGlobalToggleShortcut();
 
   // Create initial window
   const initialWin = createMainWindow();
@@ -1813,7 +2105,9 @@ app.on('will-quit', () => {
 });
 
 app.on('window-all-closed', () => {
-  // Do not quit - let app run in system tray
+  if (browserMode === 'taskbar') {
+    app.quit();
+  }
 });
 
 app.on('activate', () => {
