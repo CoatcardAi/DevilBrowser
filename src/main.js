@@ -1261,11 +1261,12 @@ ipcMain.handle('ai-get-logs', async (e, params = {}) => {
 });
 
 // ── Page Text Extraction ──
-ipcMain.handle('ai-get-page-text', async (e) => {
-  // Find the active tab's webContents
+ipcMain.handle('ai-get-page-text', async (e, tabId) => {
   const winEntry = getWindowEntry(e.sender);
-  if (!winEntry || !winEntry.activeTabId) return '';
-  const tab = winEntry.tabs.find(t => t.id === winEntry.activeTabId);
+  if (!winEntry) return '';
+  const targetId = tabId || winEntry.activeTabId;
+  if (!targetId) return '';
+  const tab = winEntry.tabs.find(t => t.id === targetId);
   if (!tab) return '';
   try {
     const text = await tab.view.webContents.executeJavaScript(
@@ -1275,20 +1276,69 @@ ipcMain.handle('ai-get-page-text', async (e) => {
   } catch { return ''; }
 });
 
-ipcMain.handle('ai-get-page-dom', async (e) => {
+ipcMain.handle('ai-get-page-dom', async (e, tabId) => {
   const winEntry = getWindowEntry(e.sender);
-  if (!winEntry || !winEntry.activeTabId) return '[]';
-  const tab = winEntry.tabs.find(t => t.id === winEntry.activeTabId);
+  if (!winEntry) return '[]';
+  const targetId = tabId || winEntry.activeTabId;
+  if (!targetId) return '[]';
+  const tab = winEntry.tabs.find(t => t.id === targetId);
   if (!tab) return '[]';
   try {
     const domJSON = await tab.view.webContents.executeJavaScript(`
       (function() {
         const els = Array.from(document.querySelectorAll('input, textarea, select, button, [role="button"], a'));
+        
+        els.forEach((el, index) => {
+          if (!el.hasAttribute('data-ai-id')) {
+            el.setAttribute('data-ai-id', index.toString());
+          }
+        });
+
+        if (!window.__aiClick) {
+          window.__aiClick = function(id) {
+            const el = document.querySelector('[data-ai-id="' + id + '"]');
+            if (el) {
+              el.focus();
+              el.click();
+              return true;
+            }
+            return false;
+          };
+        }
+        if (!window.__aiFill) {
+          window.__aiFill = function(id, val) {
+            const el = document.querySelector('[data-ai-id="' + id + '"]');
+            if (el) {
+              el.focus();
+              el.value = val;
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              return true;
+            }
+            return false;
+          };
+        }
+        if (!window.__aiSelect) {
+          window.__aiSelect = function(id, val) {
+            const el = document.querySelector('[data-ai-id="' + id + '"]');
+            if (el && el.tagName.toLowerCase() === 'select') {
+              el.focus();
+              el.value = val;
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              return true;
+            }
+            return false;
+          };
+        }
+
         return JSON.stringify(els.map(el => ({
+          aiId: el.getAttribute('data-ai-id'),
           tagName: el.tagName.toLowerCase(),
           type: el.type || el.getAttribute('type') || null,
           id: el.id || null,
           name: el.name || el.getAttribute('name') || null,
+          href: el.getAttribute('href') || el.href || null,
+          src: el.getAttribute('src') || el.src || null,
           placeholder: el.placeholder || el.getAttribute('placeholder') || null,
           labelText: el.labels && el.labels.length > 0 ? el.labels[0].innerText : (el.closest('label') ? el.closest('label').innerText : null),
           innerText: (el.innerText || '').trim().slice(0, 100),
@@ -1304,14 +1354,136 @@ ipcMain.handle('ai-get-page-dom', async (e) => {
   }
 });
 
-ipcMain.handle('ai-execute-page-action', async (e, script) => {
+ipcMain.handle('ai-execute-page-action', async (e, payload) => {
   const winEntry = getWindowEntry(e.sender);
-  if (!winEntry || !winEntry.activeTabId) return { success: false, error: 'No active window/tab found' };
-  const tab = winEntry.tabs.find(t => t.id === winEntry.activeTabId);
-  if (!tab) return { success: false, error: 'No active tab found' };
+  if (!winEntry) return { success: false, error: 'No active window found' };
+  
+  const script = typeof payload === 'string' ? payload : payload.script;
+  const tabId = typeof payload === 'object' ? payload.tabId : null;
+
+  const targetId = tabId || winEntry.activeTabId;
+  if (!targetId) return { success: false, error: 'No active tab found' };
+  const tab = winEntry.tabs.find(t => t.id === targetId);
+  if (!tab) return { success: false, error: 'Tab not found' };
   try {
     const result = await tab.view.webContents.executeJavaScript(script);
     return { success: true, result };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ai-save-file', async (e, { filename, content }) => {
+  try {
+    const downloadsPath = app.getPath('downloads');
+    const safeFilename = filename.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    const filePath = path.join(downloadsPath, safeFilename);
+    fs.writeFileSync(filePath, content, 'utf8');
+    return { success: true, filePath };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+function downloadUrlToFile(urlStr, resolve) {
+  try {
+    const url = new URL(urlStr);
+    let filename = path.basename(url.pathname) || 'downloaded_file';
+    if (!filename.includes('.')) {
+      filename += '.pdf';
+    }
+    const downloadsPath = app.getPath('downloads');
+    const filePath = path.join(downloadsPath, filename);
+
+    const lib = url.protocol === 'https:' ? https : http;
+    const file = fs.createWriteStream(filePath);
+    const req = lib.get(urlStr, (res) => {
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        const redirectUrl = res.headers.location;
+        file.close();
+        try { fs.unlinkSync(filePath); } catch(e){}
+        downloadUrlToFile(redirectUrl, resolve);
+        return;
+      }
+      if (res.statusCode !== 200) {
+        file.close();
+        try { fs.unlinkSync(filePath); } catch(e){}
+        resolve({ success: false, error: `HTTP status ${res.statusCode}` });
+        return;
+      }
+      res.pipe(file);
+      file.on('finish', () => {
+        file.close();
+        resolve({ success: true, filePath, filename });
+      });
+      file.on('error', (err) => {
+        resolve({ success: false, error: err.message });
+      });
+    });
+    req.on('error', (err) => {
+      resolve({ success: false, error: err.message });
+    });
+  } catch (err) {
+    resolve({ success: false, error: err.message });
+  }
+}
+
+ipcMain.handle('ai-download-file', async (e, urlStr) => {
+  return new Promise((resolve) => {
+    downloadUrlToFile(urlStr, resolve);
+  });
+});
+
+ipcMain.handle('ai-save-state', async (e) => {
+  try {
+    const winEntry = getWindowEntry(e.sender);
+    if (!winEntry) return { success: false, error: 'No active window' };
+    
+    const tabStates = winEntry.tabs.map(t => ({
+      url: t.url,
+      title: t.title
+    }));
+    
+    store.set('ai-saved-browser-state', {
+      tabs: tabStates,
+      activeTabUrl: winEntry.tabs.find(t => t.id === winEntry.activeTabId)?.url || 'about:blank'
+    });
+    
+    return { success: true, savedCount: tabStates.length };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ai-restore-state', async (e) => {
+  try {
+    const winEntry = getWindowEntry(e.sender);
+    if (!winEntry) return { success: false, error: 'No active window' };
+    
+    const savedState = store.get('ai-saved-browser-state');
+    if (!savedState || !savedState.tabs || savedState.tabs.length === 0) {
+      return { success: false, error: 'No saved state found' };
+    }
+    
+    const originalTabs = [...winEntry.tabs];
+    
+    const createdTabIds = [];
+    for (const t of savedState.tabs) {
+      const id = createTab(winEntry.win.id, t.url);
+      createdTabIds.push(id);
+    }
+    
+    for (const t of originalTabs) {
+      closeTab(winEntry.win.id, t.id);
+    }
+    
+    if (createdTabIds.length > 0) {
+      const activeIdx = savedState.tabs.findIndex(t => t.url === savedState.activeTabUrl);
+      const targetTabId = activeIdx !== -1 ? createdTabIds[activeIdx] : createdTabIds[0];
+      setActiveTab(winEntry.win.id, targetTabId);
+    }
+    
+    return { success: true, restoredCount: createdTabIds.length };
   } catch (err) {
     return { success: false, error: err.message };
   }

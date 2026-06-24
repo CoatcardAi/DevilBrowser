@@ -35,6 +35,7 @@
   let currentUser = null;
   let speechRec = null;
   let isListening = false;
+  let aiMemory = {};      // Cross-tab memory object
 
   // ------- Public API -------
   window.aiPanel = {
@@ -317,6 +318,35 @@
     } catch (e) { }
   }
 
+  function cleanAndParseJSON(jsonStr) {
+    let clean = jsonStr.trim();
+    // Remove comments
+    clean = clean.replace(/(?:^|\s)\/\/.*$/gm, '');
+    clean = clean.replace(/\/\*[\s\S]*?\*\//g, '');
+    
+    try {
+      return JSON.parse(clean);
+    } catch (e) {
+      // Relaxed repairs
+      try {
+        let fixed = clean
+          .replace(/'([^'\\]*(?:\\.[^'\\]*)*)'(?=\s*:)/g, '"$1"') // keys
+          .replace(/:\s*'([^'\\]*(?:\\.[^'\\]*)*)'/g, ': "$1"'); // values
+        fixed = fixed.replace(/,\s*([\]}])/g, '$1'); // trailing comma
+        return JSON.parse(fixed);
+      } catch (e2) {
+        try {
+          const fn = new Function('return (' + clean + ');');
+          const res = fn();
+          if (res && typeof res === 'object') {
+            return res;
+          }
+        } catch (e3) {}
+      }
+    }
+    return null;
+  }
+
   function parseActionCommand(text) {
     if (!text) return null;
     try {
@@ -328,21 +358,20 @@
         jsonText = matchJson[1].trim();
       }
 
-      // 2. Try parsing standard or finding bounds
-      try {
-        const parsed = JSON.parse(jsonText);
+      // 2. Try parsing directly
+      let parsed = cleanAndParseJSON(jsonText);
+      if (parsed && (parsed.action === 'page-automation' || parsed.action === 'browser-action') && parsed.action_input) {
+        return parsed;
+      }
+
+      // 3. Search for bracket bounds if direct parse fails
+      const startIdx = jsonText.indexOf('{');
+      const endIdx = jsonText.lastIndexOf('}');
+      if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+        const candidate = jsonText.slice(startIdx, endIdx + 1);
+        parsed = cleanAndParseJSON(candidate);
         if (parsed && (parsed.action === 'page-automation' || parsed.action === 'browser-action') && parsed.action_input) {
           return parsed;
-        }
-      } catch (e) {
-        const startIdx = jsonText.indexOf('{');
-        const endIdx = jsonText.lastIndexOf('}');
-        if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-          const candidate = jsonText.slice(startIdx, endIdx + 1);
-          const parsed = JSON.parse(candidate);
-          if (parsed && (parsed.action === 'page-automation' || parsed.action === 'browser-action') && parsed.action_input) {
-            return parsed;
-          }
         }
       }
     } catch (e) { }
@@ -406,8 +435,33 @@
 
       window.electronAPI.onAiStream(onChunk, onDone, onError);
 
-      // Prepare history for multi-turn (exclude last user message just added to history if displayPrompt was pushed)
-      const sendHistory = history.slice(0, -1).map(h => ({ role: h.role, text: h.text }));
+      // Prepare history for multi-turn with strict role alternation and non-empty text validation
+      let list = history.map(h => ({ role: h.role, text: (h.text || '').trim() })).filter(h => h.text.length > 0);
+      
+      // If we pushed displayPrompt in this turn, it's already in history, so exclude it from sendHistory
+      if (displayPrompt && list.length > 0 && list[list.length - 1].text === displayPrompt.trim()) {
+        list.pop();
+      }
+
+      let sendHistory = [];
+      for (let i = 0; i < list.length; i++) {
+        if (sendHistory.length === 0) {
+          if (list[i].role === 'user') {
+            sendHistory.push(list[i]);
+          }
+        } else {
+          const last = sendHistory[sendHistory.length - 1];
+          if (list[i].role !== last.role) {
+            sendHistory.push(list[i]);
+          } else {
+            sendHistory[sendHistory.length - 1] = list[i];
+          }
+        }
+      }
+      // Gemini API history must end with a model turn before appending the new user prompt
+      if (sendHistory.length > 0 && sendHistory[sendHistory.length - 1].role === 'user') {
+        sendHistory.pop();
+      }
 
       window.electronAPI.aiGenerateStream({
         prompt: apiPrompt,
@@ -469,21 +523,37 @@
     let lastScriptFailed = false;
 
     const defaultAutomationInstruction =
-      "\n\nYou are an advanced AI browsing and browser-level automation agent in DevilBrowser. You have the ability to plan, wait, control browser tabs, and interact with webpages across multiple steps. " +
-      "When the user gives you a task, formulate a plan and execute it step-by-step. " +
-      "At each step, if you need to automate webpage elements or execute browser-level tasks (like managing tabs or switching tabs), output a JSON action block calling either the 'page-automation' or 'browser-action' tool. " +
-      "\n\n--- Supported Tools ---\n" +
-      "1. page-automation: Execute vanilla JS on the active page (fill forms, click buttons, query elements, extract content).\n" +
+      "\n\n============================================================\n" +
+      "ROLE: Autonomous Web Agent (DevilBrowser AI)\n" +
+      "============================================================\n" +
+      "You are an advanced, autonomous browsing and browser-level automation agent. " +
+      "You do not simply iterate step-by-step blindly. You plan, reflect, self-correct, maintain state, and execute tasks across multiple tabs.\n\n" +
+      "--- AGENT PROTOCOL RULES ---\n" +
+      "1. Plan at Start: When a task is assigned, formulate a high-level multi-step plan. State it in your thought. Update the plan as you discover new info.\n" +
+      "2. State Reflection & Observation: Before choosing your next action, observe the results of the previous step. Check the current active URL, list of tabs, and page DOM. Make sure you don't get stuck in loops.\n" +
+      "3. Error Recovery & Self-Correction: If a page action or command fails, DO NOT repeat it. Analyze the failure: Is the element hidden? Did the page URL change? Is there a dynamic loader? Adjust your script, use alternative elements, or navigate elsewhere.\n" +
+      "4. Click Accuracy: Always prioritize using the custom page automation helpers: `__aiClick(aiId)`, `__aiFill(aiId, value)`, and `__aiSelect(aiId, value)` over raw selector queries. These targets are pre-annotated on the DOM and are 100% accurate.\n" +
+      "5. Memory Logging: Use the cross-tab memory (`set-memory` and `get-memory`) to save findings, tokens, links, and scraped text as you browse. This guarantees you do not lose information when tabs close or switch.\n" +
+      "6. Tab Management: If you need to search or inspect multiple sources, manage tabs efficiently (`new-tab`, `switch-tab`, `close-tab`). Avoid clutter.\n" +
+      "7. Final Synthesis: Only complete the loop when the user's high-level goal is fully achieved. Output a clean, structured summary of findings (do not output tool blocks in your final response).\n\n" +
+      "--- Supported Tools ---\n" +
+      "1. page-automation: Execute vanilla JS on a page (fill forms, click buttons, query elements, extract content).\n" +
       "   Format:\n" +
       "   ```json\n" +
       "   {\n" +
       "     \"action\": \"page-automation\",\n" +
       "     \"action_input\": {\n" +
-      "       \"thought\": \"Detailed reasoning of what you are doing in this step.\",\n" +
-      "       \"script\": \"const btn = document.querySelector('#submit'); if (btn) btn.click();\"\n" +
+      "       \"thought\": \"Detailed reasoning of what you are doing in this step, updating your plan/subtasks.\",\n" +
+      "       \"tabId\": \"<optional_tabId_string>\",\n" +
+      "       \"script\": \"__aiClick(\\\"5\\\");\"\n" +
       "     }\n" +
       "   }\n" +
       "   ```\n" +
+      "   NOTE: Predefined helpers in script context:\n" +
+      "   - `__aiClick(aiId)`: Click an element by its annotated aiId string (e.g. `__aiClick(\"4\")`).\n" +
+      "   - `__aiFill(aiId, value)`: Set an input/textarea's value and trigger input/change events (e.g. `__aiFill(\"2\", \"gemini 3.5\")`).\n" +
+      "   - `__aiSelect(aiId, value)`: Set a dropdown select value (e.g. `__aiSelect(\"7\", \"US\")`).\n" +
+      "\n" +
       "2. browser-action: Perform browser-level management across tabs.\n" +
       "   Format:\n" +
       "   ```json\n" +
@@ -491,7 +561,7 @@
       "     \"action\": \"browser-action\",\n" +
       "     \"action_input\": {\n" +
       "       \"thought\": \"Detailed reasoning of why you are performing this browser command.\",\n" +
-      "       \"command\": \"list-tabs | switch-tab | new-tab | close-tab | navigate\",\n" +
+      "       \"command\": \"list-tabs | switch-tab | new-tab | close-tab | navigate | go-back | go-forward | reload | read-page | search | write-file | save-state | restore-state | set-memory | get-memory | download-file | analyse-document\",\n" +
       "       \"params\": { ... } // optional parameters matching the command\n" +
       "     }\n" +
       "   }\n" +
@@ -501,10 +571,20 @@
       "   - `switch-tab`: Switch active tab. Params: `{\"tabId\": \"<tabId_string>\"}`\n" +
       "   - `new-tab`: Open a new tab. Params: `{\"url\": \"<url_string>\"}` (defaults to about:blank if not specified)\n" +
       "   - `close-tab`: Close a tab. Params: `{\"tabId\": \"<tabId_string>\"}`\n" +
-      "   - `navigate`: Navigate the active tab to a new URL. Params: `{\"url\": \"<url_string>\"}`\n\n" +
-      "After each action, you will receive the result and the updated page DOM context of the currently active tab. " +
-      "If you have completed the task or cannot proceed further, simply respond with a plain text answer explaining the results to the user (do not include action blocks).\n" +
-      "Always write clean vanilla JS and verify elements exist before interacting.";
+      "   - `navigate`: Navigate a tab to a new URL. Params: `{\"url\": \"<url_string>\", \"tabId\": \"<optional_tabId_string>\"}`\n" +
+      "   - `go-back`: Go back in history. Params: `{\"tabId\": \"<optional_tabId_string>\"}`\n" +
+      "   - `go-forward`: Go forward in history. Params: `{\"tabId\": \"<optional_tabId_string>\"}`\n" +
+      "   - `reload`: Reload the tab. Params: `{\"tabId\": \"<optional_tabId_string>\"}`\n" +
+      "   - `read-page`: Extract page content (text and DOM) of a specific tab without switching to it. Params: `{\"tabId\": \"<optional_tabId_string>\"}`\n" +
+      "   - `search`: Search Google/web for a query. Params: `{\"query\": \"<search_query>\", \"newTab\": <optional_boolean>}`\n" +
+      "   - `write-file`: Save text or structured data directly to the user's Downloads folder. Params: `{\"filename\": \"<filename>\", \"content\": \"<content>\"}`\n" +
+      "   - `save-state`: Save the browser state (list of open tabs/urls) internally. No params.\n" +
+      "   - `restore-state`: Restore the browser state to the last saved backup. No params.\n" +
+      "   - `set-memory`: Store information persistently in a cross-tab memory store. Params: `{\"key\": \"<key>\", \"value\": \"<value>\"}`\n" +
+      "   - `get-memory`: Get stored information from the cross-tab memory store. Params: `{\"key\": \"<key>\"}`\n" +
+      "   - `download-file`: Download a file (e.g. PDF/ZIP) directly. Returns filePath. Params: `{\"url\": \"<url_string>\"}`\n" +
+      "   - `analyse-document`: Read/analyze local documents (e.g. downloaded PDFs). Returns text content. Params: `{\"filePath\": \"<file_path_string>\", \"mimeType\": \"<optional_mime_type_string>\", \"name\": \"<optional_name_string>\"}`\n\n" +
+      "Verify elements exist before interacting. If you have completed the task or cannot proceed further, simply respond with a plain text answer explaining the results to the user (do not include action blocks).";
 
     let sysInstr = (sysInstrArea ? sysInstrArea.value.trim() : '');
     sysInstr += defaultAutomationInstruction;
@@ -512,19 +592,38 @@
     while (step < maxSteps) {
       step++;
 
-      // 1. Get live DOM and URL
+      // 1. Get browser tabs and memory context
+      let tabsContext = "";
+      try {
+        const tabList = (window._tabs || []).map(t => ({
+          id: t.id,
+          title: t.title,
+          url: t.url,
+          active: t.id === window._activeTabId
+        }));
+        tabsContext = `[Browser Tabs]\n${JSON.stringify(tabList, null, 2)}\n\n`;
+      } catch (e) {
+        console.error("Failed to fetch tabs list", e);
+      }
+
+      let memoryContext = "";
+      if (Object.keys(aiMemory).length > 0) {
+        memoryContext = `[AI Cross-Tab Memory]\n${JSON.stringify(aiMemory, null, 2)}\n\n`;
+      }
+
+      // 2. Get live DOM and URL of active tab
       let pageContext = "";
       try {
         const activeUrl = document.getElementById('address') ? document.getElementById('address').value : '';
         const pageDom = await window.electronAPI.aiGetPageDOM();
         if (pageDom && pageDom !== '[]' && pageDom !== '{"error":"No active tab found"}') {
-          pageContext = `[Current Page Context]\nURL: ${activeUrl}\nInteractive Elements (DOM):\n${pageDom}\n\n`;
+          pageContext = `[Current Active Page Context]\nURL: ${activeUrl}\nInteractive Elements (DOM):\n${pageDom}\n\n`;
         }
       } catch (e) {
         console.error("Failed to fetch DOM context", e);
       }
 
-      // 2. Fetch AI response with dynamic retry logic for empty or failed generations
+      // 3. Fetch AI response with dynamic retry logic for empty or failed generations
       let fullText = "";
       let retries = 0;
       const maxRetries = 3;
@@ -532,7 +631,7 @@
 
       while (retries < maxRetries) {
         try {
-          const apiPrompt = pageContext + stepPrompt;
+          const apiPrompt = tabsContext + memoryContext + pageContext + stepPrompt;
           fullText = await getStreamResponse(currentDisplayPrompt, apiPrompt, sysInstr);
 
           if (fullText && fullText.trim().length > 0) {
@@ -560,7 +659,7 @@
         break;
       }
 
-      // 3. Parse action from response
+      // 4. Parse action from response
       const parsedAction = parseActionCommand(fullText);
       if (!parsedAction) {
         // No action block found, task complete!
@@ -606,10 +705,110 @@
             executionResult = { success: true, result: `Closed tab ${tabId}` };
           } else if (command === 'navigate') {
             const url = params?.url;
+            const tabId = params?.tabId || window._activeTabId;
             if (!url) throw new Error("Missing url parameter");
-            await window.electronAPI.navigateTab({ tabId: window._activeTabId, url });
+            await window.electronAPI.navigateTab({ tabId, url });
             await waitForPageLoad();
-            executionResult = { success: true, result: `Navigated current tab to ${url}` };
+            executionResult = { success: true, result: `Navigated tab ${tabId} to ${url}` };
+          } else if (command === 'go-back') {
+            const tabId = params?.tabId || window._activeTabId;
+            await window.electronAPI.goBack(tabId);
+            await new Promise(resolve => setTimeout(resolve, 500));
+            executionResult = { success: true, result: `Navigated back on tab ${tabId}` };
+          } else if (command === 'go-forward') {
+            const tabId = params?.tabId || window._activeTabId;
+            await window.electronAPI.goForward(tabId);
+            await new Promise(resolve => setTimeout(resolve, 500));
+            executionResult = { success: true, result: `Navigated forward on tab ${tabId}` };
+          } else if (command === 'reload') {
+            const tabId = params?.tabId || window._activeTabId;
+            await window.electronAPI.reload(tabId);
+            await waitForPageLoad();
+            executionResult = { success: true, result: `Reloaded tab ${tabId}` };
+          } else if (command === 'read-page') {
+            const tabId = params?.tabId || window._activeTabId;
+            if (!tabId) throw new Error("No active tab to read");
+            const pageText = await window.electronAPI.aiGetPageText(tabId);
+            const pageDom = await window.electronAPI.aiGetPageDOM(tabId);
+            executionResult = {
+              success: true,
+              result: {
+                url: (window._tabs || []).find(t => t.id === tabId)?.url,
+                title: (window._tabs || []).find(t => t.id === tabId)?.title,
+                innerText: pageText.slice(0, 15000),
+                dom: JSON.parse(pageDom)
+              }
+            };
+          } else if (command === 'search') {
+            const query = params?.query;
+            const newTab = params?.newTab !== false;
+            if (!query) throw new Error("Missing query parameter");
+            const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+            if (newTab) {
+              const res = await window.electronAPI.createTab(searchUrl);
+              await waitForPageLoad();
+              executionResult = { success: true, result: `Created new tab with ID ${res?.id} and searched for "${query}"` };
+            } else {
+              await window.electronAPI.navigateTab({ tabId: window._activeTabId, url: searchUrl });
+              await waitForPageLoad();
+              executionResult = { success: true, result: `Searched for "${query}" in active tab` };
+            }
+          } else if (command === 'write-file') {
+            const filename = params?.filename;
+            const content = params?.content;
+            if (!filename) throw new Error("Missing filename parameter");
+            if (content === undefined) throw new Error("Missing content parameter");
+            const res = await window.electronAPI.aiSaveFile(filename, content);
+            if (res.success) {
+              executionResult = { success: true, result: `Saved file to ${res.filePath}` };
+            } else {
+              throw new Error(res.error);
+            }
+          } else if (command === 'download-file') {
+            const url = params?.url;
+            if (!url) throw new Error("Missing url parameter");
+            const res = await window.electronAPI.aiDownloadFile(url);
+            if (res.success) {
+              executionResult = { success: true, result: { filePath: res.filePath, filename: res.filename } };
+            } else {
+              throw new Error(res.error);
+            }
+          } else if (command === 'analyse-document') {
+            const filePath = params?.filePath;
+            const mimeType = params?.mimeType || 'application/pdf';
+            const name = params?.name || 'document';
+            if (!filePath) throw new Error("Missing filePath parameter");
+            const res = await window.electronAPI.aiAnalyseDocument(filePath, mimeType, name);
+            if (res && res.text) {
+              executionResult = { success: true, result: res.text };
+            } else {
+              throw new Error(res ? res.error : "Failed to analyze document");
+            }
+          } else if (command === 'save-state') {
+            const res = await window.electronAPI.aiSaveState();
+            if (res.success) {
+              executionResult = { success: true, result: `Saved browser state with ${res.savedCount} tabs.` };
+            } else {
+              throw new Error(res.error);
+            }
+          } else if (command === 'restore-state') {
+            const res = await window.electronAPI.aiRestoreState();
+            if (res.success) {
+              executionResult = { success: true, result: `Restored browser state with ${res.restoredCount} tabs.` };
+            } else {
+              throw new Error(res.error);
+            }
+          } else if (command === 'set-memory') {
+            const key = params?.key;
+            const value = params?.value;
+            if (!key) throw new Error("Missing key parameter");
+            aiMemory[key] = value;
+            executionResult = { success: true, result: `Stored key "${key}" in cross-tab memory` };
+          } else if (command === 'get-memory') {
+            const key = params?.key;
+            if (!key) throw new Error("Missing key parameter");
+            const val = aiMemory[key];
+            executionResult = { success: true, result: { key, value: val !== undefined ? val : null } };
           } else {
             throw new Error(`Unknown browser command: ${command}`);
           }
@@ -628,12 +827,12 @@
         }
       } else {
         // Standard page-automation
-        const { script } = action_input;
+        const { script, tabId } = action_input;
         appendMessage('model', `🤖 **Step ${step} Thought:** *${thought}*`);
         const execBubble = appendMessage('model', `⏳ **Executing browser action...**`);
         if (execBubble) execBubble.classList.add('streaming');
 
-        executionResult = await window.electronAPI.aiExecutePageAction(script);
+        executionResult = await window.electronAPI.aiExecutePageAction(script, tabId);
 
         if (execBubble) {
           execBubble.classList.remove('streaming');
