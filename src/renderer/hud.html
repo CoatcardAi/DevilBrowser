@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Task HUD</title>
+  <style>
+    :root {
+      --accent: #8b5cf6;
+      --accent-bright: #a78bfa;
+      --emerald: #10b981;
+      --rose: #ef4444;
+      --bg: rgba(11, 13, 21, 0.95);
+      --border: rgba(139, 92, 246, 0.35);
+      --text: #ffffff;
+      --text-muted: rgba(255, 255, 255, 0.6);
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: var(--font-sans);
+      background: transparent;
+      color: var(--text);
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    /* Main container is glassmorphic, fills the window */
+    .hud-container {
+      width: 100%;
+      height: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: 
+        0 12px 36px rgba(0, 0, 0, 0.6), 
+        0 0 20px rgba(139, 92, 246, 0.15);
+      backdrop-filter: blur(20px);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Header is draggable natively */
+    .hud-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 12px;
+      background: linear-gradient(90deg, rgba(139, 92, 246, 0.1), transparent);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      -webkit-app-region: drag;
+      user-select: none;
+    }
+
+    .hud-header-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .hud-pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-bright);
+      box-shadow: 0 0 10px var(--accent);
+      animation: hud-pulse 1.5s ease-in-out infinite;
+      flex-shrink: 0;
+    }
+
+    .hud-container.done .hud-pulse-dot {
+      background: var(--emerald);
+      box-shadow: 0 0 10px var(--emerald);
+      animation: none;
+    }
+
+    .hud-container.error .hud-pulse-dot {
+      background: var(--rose);
+      box-shadow: 0 0 10px var(--rose);
+      animation: none;
+    }
+
+    @keyframes hud-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.4; transform: scale(0.75); }
+    }
+
+    .hud-title {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+
+    /* Controls are NOT draggable so clicks register */
+    .hud-header-right {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      -webkit-app-region: no-drag;
+    }
+
+    .hud-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      width: 22px;
+      height: 22px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .hud-btn:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text);
+    }
+
+    .hud-btn.danger:hover {
+      background: rgba(239, 68, 68, 0.2);
+      color: #ff8888;
+    }
+
+    /* Steps Area */
+    .hud-steps {
+      flex: 1;
+      padding: 10px 12px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    /* Scrollbar */
+    .hud-steps::-webkit-scrollbar {
+      width: 4px;
+    }
+    .hud-steps::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .hud-steps::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 2px;
+    }
+
+    .hud-step {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      font-size: 11.5px;
+      line-height: 1.4;
+      animation: step-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+
+    @keyframes step-in {
+      from { opacity: 0; transform: translateY(4px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .hud-step-icon {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 8px;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    .hud-step-icon.running {
+      border: 1.5px solid rgba(139, 92, 246, 0.2);
+      border-top-color: var(--accent-bright);
+      animation: spin 0.8s linear infinite;
+    }
+
+    .hud-step-icon.done {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--emerald);
+      font-size: 9px;
+    }
+
+    .hud-step-icon.error {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--rose);
+      font-size: 9px;
+    }
+
+    .hud-step-icon.skip {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text-muted);
+    }
+
+    .hud-step-text {
+      color: var(--text-muted);
+    }
+
+    .hud-step.running .hud-step-text {
+      color: var(--text);
+    }
+
+    .hud-step.done .hud-step-text {
+      color: var(--text-muted);
+    }
+
+    .hud-done-line, .hud-error-line {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-top: 4px;
+      padding-top: 6px;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .hud-done-line { color: var(--emerald); }
+    .hud-error-line { color: var(--rose); }
+
+    @keyframes spin {
+      100% { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div id="hud-container" class="hud-container">
+    <div class="hud-header">
+      <div class="hud-header-left">
+        <span class="hud-pulse-dot"></span>
+        <span id="hud-title" class="hud-title">AI Agent Running...</span>
+      </div>
+      <div class="hud-header-right">
+        <button id="hud-minimize" class="hud-btn" title="Minimize">▼</button>
+        <button id="hud-cancel" class="hud-btn danger" title="Cancel Task">✕</button>
+      </div>
+    </div>
+    <div id="hud-steps" class="hud-steps">
+      <!-- Steps will be dynamically rendered here -->
+    </div>
+  </div>
+
+  <script src="hud-renderer.js"></script>
+</body>
+</html>

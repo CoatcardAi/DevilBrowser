@@ -422,6 +422,11 @@
     if (e.key === 'Escape' && isOpen) close();
   });
 
+  // Listen for global shortcut forwarded from main process
+  window.electronAPI.on('open-command-palette', () => {
+    isOpen ? close() : open();
+  });
+
   // Expose for external use
   window.cmdPalette = { open, close };
 })();

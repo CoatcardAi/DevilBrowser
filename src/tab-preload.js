@@ -230,3 +230,154 @@ window.addEventListener('load', () => {
     } catch {}
   }, 2000);
 });
+
+// ----------------------------------------------------
+// Text Selection Quick Actions (In-Page Shadow DOM Popover)
+// ----------------------------------------------------
+(function() {
+  let popoverContainer = null;
+  let lastSelectedText = '';
+
+  function showSelectionPopover(rect, text) {
+    if (!popoverContainer) {
+      popoverContainer = document.createElement('div');
+      popoverContainer.id = 'devil-selection-popover-root';
+      popoverContainer.style.position = 'absolute';
+      popoverContainer.style.zIndex = '999999999';
+      popoverContainer.style.pointerEvents = 'auto';
+      
+      const shadow = popoverContainer.attachShadow({ mode: 'open' });
+      
+      const style = document.createElement('style');
+      style.textContent = `
+        .popover {
+          display: flex;
+          align-items: center;
+          background: #0b0d15;
+          border: 1px solid rgba(139, 92, 246, 0.45);
+          border-radius: 8px;
+          padding: 4px;
+          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.65), 0 0 15px rgba(139, 92, 246, 0.2);
+          gap: 3px;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+          font-size: 11px;
+          color: #ffffff;
+        }
+        .action-btn {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          background: transparent;
+          border: none;
+          color: rgba(255, 255, 255, 0.85);
+          padding: 5px 8px;
+          cursor: pointer;
+          border-radius: 4px;
+          font-weight: 500;
+          transition: all 0.2s ease;
+          white-space: nowrap;
+        }
+        .action-btn:hover {
+          background: rgba(139, 92, 246, 0.25);
+          color: #ffffff;
+        }
+        .action-btn .icon {
+          font-size: 13px;
+        }
+        .arrow {
+          position: absolute;
+          bottom: -5px;
+          left: 50%;
+          transform: translateX(-50%);
+          width: 0;
+          height: 0;
+          border-left: 6px solid transparent;
+          border-right: 6px solid transparent;
+          border-top: 6px solid #0b0d15;
+        }
+      `;
+      
+      const popoverEl = document.createElement('div');
+      popoverEl.className = 'popover';
+      
+      const actions = [
+        { id: 'explain', icon: '💡', label: 'Explain' },
+        { id: 'shorten', icon: '📝', label: 'Summarise' },
+        { id: 'translate', icon: '🌐', label: 'Translate' },
+        { id: 'improve', icon: '✨', label: 'Improve' },
+        { id: 'copy', icon: '📋', label: 'Copy' }
+      ];
+      
+      actions.forEach(act => {
+        const btn = document.createElement('button');
+        btn.className = 'action-btn';
+        btn.innerHTML = `<span class="icon">${act.icon}</span><span>${act.label}</span>`;
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          
+          if (act.id === 'copy') {
+            navigator.clipboard.writeText(lastSelectedText);
+          } else {
+            ipcRenderer.send('ai-tab-context-action', {
+              action: act.id,
+              text: lastSelectedText
+            });
+          }
+          hideSelectionPopover();
+        });
+        popoverEl.appendChild(btn);
+      });
+      
+      const arrow = document.createElement('div');
+      arrow.className = 'arrow';
+      
+      shadow.appendChild(style);
+      shadow.appendChild(popoverEl);
+      shadow.appendChild(arrow);
+      
+      document.body.appendChild(popoverContainer);
+    }
+    
+    lastSelectedText = text;
+    popoverContainer.style.display = 'block';
+    
+    const scrollX = window.scrollX || window.pageXOffset;
+    const scrollY = window.scrollY || window.pageYOffset;
+    
+    const popoverWidth = 360; 
+    const x = rect.left + rect.width / 2 + scrollX - (popoverWidth / 2);
+    const y = rect.top + scrollY - 42; 
+    
+    popoverContainer.style.left = `${Math.max(10, x)}px`;
+    popoverContainer.style.top = `${y}px`;
+  }
+
+  function hideSelectionPopover() {
+    if (popoverContainer) {
+      popoverContainer.style.display = 'none';
+    }
+  }
+
+  document.addEventListener('mouseup', (e) => {
+    if (popoverContainer && popoverContainer.contains(e.target)) return;
+    
+    setTimeout(() => {
+      const selection = window.getSelection();
+      const text = selection ? selection.toString().trim() : '';
+      if (text.length > 5) {
+        const range = selection.getRangeAt(0);
+        const rect = range.getBoundingClientRect();
+        showSelectionPopover(rect, text);
+      } else {
+        hideSelectionPopover();
+      }
+    }, 60);
+  });
+
+  document.addEventListener('mousedown', (e) => {
+    if (popoverContainer && popoverContainer.contains(e.target)) return;
+    hideSelectionPopover();
+  });
+})();
+

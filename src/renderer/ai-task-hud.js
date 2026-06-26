@@ -1,117 +1,77 @@
 // ============================================================
 // AI Task HUD — DevilBrowser
-// Floating overlay showing live AI task steps (like ChatGPT's "Searching...")
+// Controls the native standalone floating child window HUD via IPC
 // Sprint 1 — DevilBrowser Advanced AI Features
 // ============================================================
 (function () {
   'use strict';
 
-  const hud = document.getElementById('ai-task-hud');
-  const hudTitle = document.getElementById('ai-hud-title');
-  const hudSteps = document.getElementById('ai-hud-steps');
-  const hudCancel = document.getElementById('ai-hud-cancel');
-  const hudMinimize = document.getElementById('ai-hud-minimize');
-
-  if (!hud) return;
-
-  let steps = [];
-  let isMinimized = false;
   let onCancelCallback = null;
 
   const HUD = window.aiTaskHUD = {
     // Start a new task with a title
     start(title, onCancel) {
-      steps = [];
       onCancelCallback = onCancel || null;
-      isMinimized = false;
-      if (hudTitle) hudTitle.textContent = title;
-      if (hudSteps) hudSteps.innerHTML = '';
-      hud.classList.remove('hidden', 'minimized');
-      hud.classList.add('visible');
+      window.electronAPI.hudStateUpdate({
+        type: 'start',
+        title
+      });
     },
 
     // Add a new step
     addStep(text, status = 'running') {
-      const step = { text, status, id: Date.now() };
-      steps.push(step);
-      renderStep(step);
-      return step.id;
+      const id = Date.now() + Math.random().toString(36).substr(2, 4);
+      window.electronAPI.hudStateUpdate({
+        type: 'addStep',
+        id,
+        text,
+        status
+      });
+      return id;
     },
 
     // Update a step status: 'running' | 'done' | 'error' | 'skip'
     updateStep(id, status, newText) {
-      const step = steps.find(s => s.id === id);
-      if (!step) return;
-      step.status = status;
-      if (newText) step.text = newText;
-      renderSteps();
+      window.electronAPI.hudStateUpdate({
+        type: 'updateStep',
+        id,
+        status,
+        newText
+      });
     },
 
     // Complete the task
     done(summaryText) {
-      const doneEl = document.createElement('div');
-      doneEl.className = 'hud-done-line';
-      doneEl.innerHTML = `<span class="hud-step-icon done">✓</span><span>${summaryText || 'Task completed'}</span>`;
-      if (hudSteps) hudSteps.appendChild(doneEl);
-      hud.classList.add('done');
+      window.electronAPI.hudStateUpdate({
+        type: 'done',
+        summaryText
+      });
       setTimeout(() => HUD.hide(), 4000);
     },
 
     // Error state
     error(message) {
-      const errEl = document.createElement('div');
-      errEl.className = 'hud-error-line';
-      errEl.innerHTML = `<span class="hud-step-icon error">✕</span><span>${message}</span>`;
-      if (hudSteps) hudSteps.appendChild(errEl);
+      window.electronAPI.hudStateUpdate({
+        type: 'error',
+        message
+      });
       setTimeout(() => HUD.hide(), 5000);
     },
 
+    // Hide HUD window
     hide() {
-      hud.classList.remove('visible', 'done');
-      setTimeout(() => hud.classList.add('hidden'), 300);
-      steps = [];
+      window.electronAPI.hudStateUpdate({
+        type: 'hide'
+      });
       onCancelCallback = null;
     }
   };
 
-  function renderSteps() {
-    if (!hudSteps) return;
-    hudSteps.innerHTML = '';
-    steps.forEach(s => renderStep(s));
-  }
-
-  function renderStep(step) {
-    if (!hudSteps) return;
-    // Check if step el exists
-    let el = hudSteps.querySelector(`[data-step-id="${step.id}"]`);
-    if (!el) {
-      el = document.createElement('div');
-      el.className = 'hud-step';
-      el.dataset.stepId = step.id;
-      hudSteps.appendChild(el);
+  // Listen for native HUD cancel click forwarding
+  window.electronAPI.on('hud-cancel-triggered', () => {
+    if (onCancelCallback) {
+      onCancelCallback();
     }
-    const icons = { running: '<span class="hud-spinner"></span>', done: '✓', error: '✕', skip: '→' };
-    el.className = `hud-step ${step.status}`;
-    el.innerHTML = `
-      <span class="hud-step-icon ${step.status}">${icons[step.status] || '•'}</span>
-      <span class="hud-step-text">${step.text}</span>
-    `;
-    // Scroll to bottom
-    hudSteps.scrollTop = hudSteps.scrollHeight;
-  }
-
-  if (hudCancel) {
-    hudCancel.addEventListener('click', () => {
-      if (onCancelCallback) onCancelCallback();
-      HUD.hide();
-    });
-  }
-
-  if (hudMinimize) {
-    hudMinimize.addEventListener('click', () => {
-      isMinimized = !isMinimized;
-      hud.classList.toggle('minimized', isMinimized);
-      hudMinimize.textContent = isMinimized ? '▲' : '▼';
-    });
-  }
+    HUD.hide();
+  });
 })();

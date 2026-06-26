@@ -32,7 +32,10 @@ const AI_SAFE_CHANNELS = [
   'ai-context-action',
   'ai-stream-chunk',
   'ai-stream-done',
-  'ai-stream-error'
+  'ai-stream-error',
+  'hud-data',
+  'hud-cancel-triggered',
+  'open-command-palette'
 ];
 
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -123,6 +126,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── AI Embeddings / Semantic Search ──
   aiSemanticSearch: (query) => ipcRenderer.invoke('ai-semantic-search', query),
   aiIndexPage:      (url, title, text) => ipcRenderer.invoke('ai-index-page', { url, title, text }),
+
+  // ── standalone HUD window actions ──
+  hudStateUpdate: (data) => ipcRenderer.send('hud-state-update', data),
+  hudCancelClicked: () => ipcRenderer.send('hud-cancel-clicked'),
 
   // ── Streaming event helpers ──
   onAiStream: (onChunk, onDone, onError) => {

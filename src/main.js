@@ -323,7 +323,8 @@ function createMainWindow(isIncognito = false) {
     activeTabId: null,
     closedTabsHistory: [],
     toolbarHeight: 110,
-    rightMargin: 0
+    rightMargin: 0,
+    hudWindow: null
   });
 
   // Apply saved content protection preference on startup (default true)
@@ -359,6 +360,9 @@ function createMainWindow(isIncognito = false) {
   win.on('closed', () => {
     const data = windows.get(winId);
     if (data) {
+      if (data.hudWindow && !data.hudWindow.isDestroyed()) {
+        try { data.hudWindow.destroy(); } catch (e) {}
+      }
       for (const t of data.tabs) {
         try {
           t.view.webContents.destroy();
@@ -464,6 +468,141 @@ function createTab(winId, url) {
 
   // Set as active tab
   setActiveTab(winId, tabId);
+
+  // Chrome-like context menu for tab webContents
+  view.webContents.on('context-menu', (event, params) => {
+    const menuTemplate = [];
+
+    // Back / Forward / Reload
+    menuTemplate.push({
+      label: 'Back',
+      enabled: view.webContents.canGoBack(),
+      click: () => view.webContents.goBack()
+    });
+    menuTemplate.push({
+      label: 'Forward',
+      enabled: view.webContents.canGoForward(),
+      click: () => view.webContents.goForward()
+    });
+    menuTemplate.push({
+      label: 'Reload',
+      click: () => view.webContents.reload()
+    });
+    menuTemplate.push({ type: 'separator' });
+
+    // Link options
+    if (params.linkURL) {
+      menuTemplate.push({
+        label: 'Open Link in New Tab',
+        click: () => {
+          createTab(winId, params.linkURL);
+        }
+      });
+      menuTemplate.push({
+        label: 'Copy Link Address',
+        click: () => {
+          const { clipboard } = require('electron');
+          clipboard.writeText(params.linkURL);
+        }
+      });
+      menuTemplate.push({ type: 'separator' });
+    }
+
+    // Image options
+    if (params.mediaType === 'image') {
+      menuTemplate.push({
+        label: '✨ Analyze Image with AI',
+        click: () => {
+          view.webContents.send('ai-context-menu-trigger', 'analyse-image');
+        }
+      });
+      menuTemplate.push({
+        label: 'Copy Image Address',
+        click: () => {
+          const { clipboard } = require('electron');
+          clipboard.writeText(params.srcURL);
+        }
+      });
+      menuTemplate.push({ type: 'separator' });
+    }
+
+    // Selection options
+    const hasSelection = params.selectionText && params.selectionText.trim() !== '';
+    if (hasSelection) {
+      menuTemplate.push({
+        label: '✨ AI Explain Text',
+        click: () => {
+          view.webContents.send('ai-context-menu-trigger', 'explain');
+        }
+      });
+      menuTemplate.push({
+        label: '✨ AI Summarise Selection',
+        click: () => {
+          view.webContents.send('ai-context-menu-trigger', 'shorten');
+        }
+      });
+      menuTemplate.push({
+        label: '✨ AI Translate to Hindi/English',
+        click: () => {
+          view.webContents.send('ai-context-menu-trigger', 'translate');
+        }
+      });
+      menuTemplate.push({
+        label: '✨ AI Improve Style',
+        click: () => {
+          view.webContents.send('ai-context-menu-trigger', 'improve');
+        }
+      });
+      menuTemplate.push({ type: 'separator' });
+
+      menuTemplate.push({ role: 'copy' });
+      menuTemplate.push({ role: 'selectAll' });
+    } else {
+      // General editing or page options
+      if (params.isEditable) {
+        menuTemplate.push({ role: 'undo' });
+        menuTemplate.push({ role: 'redo' });
+        menuTemplate.push({ type: 'separator' });
+        menuTemplate.push({ role: 'cut' });
+        menuTemplate.push({ role: 'copy' });
+        menuTemplate.push({ role: 'paste' });
+        menuTemplate.push({ role: 'selectAll' });
+      } else {
+        // Page level AI actions
+        menuTemplate.push({
+          label: '✨ Summarise Whole Page',
+          click: () => {
+            data.win.webContents.send('ai-context-action', { action: 'chat', text: 'Please summarise the content of this page in 5 bullet points.' });
+          }
+        });
+        menuTemplate.push({
+          label: '✨ Extract Data from Page',
+          click: () => {
+            data.win.webContents.send('ai-context-action', { action: 'chat', text: 'Please extract all structured data from this page: tables, prices, emails, phone numbers, addresses. Format as a clean list.' });
+          }
+        });
+        menuTemplate.push({
+          label: '✨ Auto-Fill Forms on Page',
+          click: () => {
+            data.win.webContents.send('ai-context-action', { action: 'chat', text: 'Please find all input fields and forms on this page and fill them using my persona profile.' });
+          }
+        });
+        menuTemplate.push({ type: 'separator' });
+        menuTemplate.push({ role: 'selectAll' });
+      }
+    }
+
+    menuTemplate.push({ type: 'separator' });
+    menuTemplate.push({
+      label: 'Inspect Element',
+      click: () => {
+        view.webContents.inspectElement(params.x, params.y);
+      }
+    });
+
+    const menu = Menu.buildFromTemplate(menuTemplate);
+    menu.popup({ window: data.win });
+  });
 
   // Setup event listeners for tab updates
   view.webContents.on('did-start-loading', () => {
@@ -819,6 +958,11 @@ function handleShortcutAction(winEntry, accelerator) {
     return true;
   }
 
+  if (normAcc === 'control+k') {
+    winEntry.win.webContents.send('open-command-palette');
+    return true;
+  }
+
   if (normAcc === 'alt+a') {
     winEntry.win.webContents.send('shortcut-toggle-routing');
     return true;
@@ -1001,6 +1145,68 @@ ipcMain.handle('tab-reload', (e, tabId) => {
   const t = winEntry.tabs.find(x => x.id === tabId);
   if (t) {
     t.view.webContents.reload();
+  }
+});
+
+ipcMain.on('hud-state-update', (e, data) => {
+  const winEntry = getWindowEntry(e.sender);
+  if (!winEntry) return;
+
+  if (data.type === 'start') {
+    if (!winEntry.hudWindow || winEntry.hudWindow.isDestroyed()) {
+      winEntry.hudWindow = new BrowserWindow({
+        width: 320,
+        height: 180,
+        parent: winEntry.win,
+        modal: false,
+        frame: false,
+        transparent: true,
+        alwaysOnTop: true,
+        resizable: true,
+        skipTaskbar: true,
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: true,
+          preload: path.join(__dirname, 'preload.js')
+        }
+      });
+      winEntry.hudWindow.loadFile(path.join(__dirname, 'renderer', 'hud.html'));
+      
+      winEntry.hudWindow.once('ready-to-show', () => {
+        const parentBounds = winEntry.win.getBounds();
+        const x = parentBounds.x + parentBounds.width - 340;
+        const y = parentBounds.y + parentBounds.height - 200;
+        winEntry.hudWindow.setBounds({ x, y, width: 320, height: 180 });
+        winEntry.hudWindow.show();
+        
+        setTimeout(() => {
+          if (winEntry.hudWindow && !winEntry.hudWindow.isDestroyed()) {
+            winEntry.hudWindow.webContents.send('hud-data', data);
+          }
+        }, 200);
+      });
+    } else {
+      winEntry.hudWindow.show();
+      winEntry.hudWindow.webContents.send('hud-data', data);
+    }
+  } else if (data.type === 'hide') {
+    if (winEntry.hudWindow && !winEntry.hudWindow.isDestroyed()) {
+      winEntry.hudWindow.close();
+      winEntry.hudWindow = null;
+    }
+  } else {
+    if (winEntry.hudWindow && !winEntry.hudWindow.isDestroyed()) {
+      winEntry.hudWindow.webContents.send('hud-data', data);
+    }
+  }
+});
+
+ipcMain.on('hud-cancel-clicked', (e) => {
+  for (const entry of windows.values()) {
+    if (entry.hudWindow && entry.hudWindow.webContents === e.sender) {
+      entry.win.webContents.send('hud-cancel-triggered');
+      break;
+    }
   }
 });
 
