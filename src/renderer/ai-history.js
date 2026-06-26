@@ -28,6 +28,11 @@
         return;
       }
       if (!panel) return;
+
+      if (window.closeAllSidePanels) {
+        window.closeAllSidePanels('ai-history-panel');
+      }
+
       panel.classList.add('open');
       updateLayout();
       await populateModelOptions();

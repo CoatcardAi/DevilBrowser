@@ -25,6 +25,11 @@
         return;
       }
       if (!panel) return;
+
+      if (window.closeAllSidePanels) {
+        window.closeAllSidePanels('ai-image-panel');
+      }
+
       panel.classList.add('open');
       updateLayout();
       await loadImageModels();
@@ -254,7 +259,11 @@
         });
         if (res.success) {
           let filename = res.filePath.replace(/\\/g, '/').split('/').pop();
-          setStatus(`Image saved successfully as ${filename}!`, 'success');
+          setStatus(`Image saved as ${filename}!`, 'success');
+          // Log to downloads panel
+          if (window.addCompletedDownload) {
+            window.addCompletedDownload({ fileName: filename, filePath: res.filePath });
+          }
         } else if (res.error !== 'Canceled') {
           setStatus(`⚠️ Failed to save: ${res.error}`, 'error');
         } else {

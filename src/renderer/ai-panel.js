@@ -117,6 +117,11 @@
       return;
     }
     if (!panel) return;
+
+    if (window.closeAllSidePanels) {
+      window.closeAllSidePanels('ai-panel');
+    }
+
     panel.classList.add('open');
     if (btnAiToggle) btnAiToggle.classList.add('active');
     updatePageContext();
@@ -335,9 +340,9 @@
             </button>
           </div>
           <div class="ai-welcome-tips">
-            <span>💡 Select text → right-click → AI actions</span>
+            <span>⌨️ Press <code>Ctrl+K</code> for Command Palette</span>
+            <span>💡 Select text → AI Quick Actions popover</span>
             <span>🖼️ Right-click images to analyse them</span>
-            <span>📄 Type <code>ai:</code> in the address bar</span>
           </div>
         </div>`;
 
@@ -634,6 +639,14 @@
   async function runAgentLoop(userMessage) {
     if (isStreaming) return;
 
+    // Show AI Task HUD
+    if (window.aiTaskHUD) {
+      window.aiTaskHUD.start('AI Agent — Initializing...', () => {
+        isStreaming = false; // Allow cancellation
+      });
+      window.aiTaskHUD.addStep('Reading your request', 'running');
+    }
+
     let currentApiPrompt = userMessage;
     let currentDisplayPrompt = userMessage;
     let step = 0;
@@ -681,7 +694,7 @@
       "     \"action\": \"browser-action\",\n" +
       "     \"action_input\": {\n" +
       "       \"thought\": \"Detailed reasoning of why you are performing this browser command.\",\n" +
-      "       \"command\": \"list-tabs | switch-tab | new-tab | close-tab | navigate | go-back | go-forward | reload | read-page | search | write-file | save-state | restore-state | set-memory | get-memory | download-file | analyse-document\",\n" +
+      "       \"command\": \"list-tabs | switch-tab | new-tab | close-tab | navigate | go-back | go-forward | reload | read-page | search | write-file | save-state | restore-state | set-memory | get-memory | download-file | analyse-document | get-persona | search-credential\",\n" +
       "       \"params\": { ... } // optional parameters matching the command\n" +
       "     }\n" +
       "   }\n" +
@@ -703,7 +716,9 @@
       "   - `set-memory`: Store information persistently in a cross-tab memory store. Params: `{\"key\": \"<key>\", \"value\": \"<value>\"}`\n" +
       "   - `get-memory`: Get stored information from the cross-tab memory store. Params: `{\"key\": \"<key>\"}`\n" +
       "   - `download-file`: Download a file (e.g. PDF/ZIP) directly. Returns filePath. Params: `{\"url\": \"<url_string>\"}`\n" +
-      "   - `analyse-document`: Read/analyze local documents (e.g. downloaded PDFs). Returns text content. Params: `{\"filePath\": \"<file_path_string>\", \"mimeType\": \"<optional_mime_type_string>\", \"name\": \"<optional_name_string>\"}`\n\n" +
+      "   - `analyse-document`: Read/analyze local documents (e.g. downloaded PDFs). Returns text content. Params: `{\"filePath\": \"<file_path_string>\", \"mimeType\": \"<optional_mime_type_string>\", \"name\": \"<optional_name_string>\"}`\n" +
+      "   - `get-persona`: Retrieve the user's full persona profile details (name, email, phone, location, skills, summary) for form-filling. No params.\n" +
+      "   - `search-credential`: Retrieve the stored login username and decrypted password for a specific website domain. Params: `{\"domain\": \"<domain_name>\"}`\n\n" +
       "Verify elements exist before interacting. If you have completed the task or cannot proceed further, simply respond with a plain text answer explaining the results to the user (do not include action blocks).";
 
     let sysInstr = (sysInstrArea ? sysInstrArea.value.trim() : '');
@@ -783,11 +798,21 @@
       const parsedAction = parseActionCommand(fullText);
       if (!parsedAction) {
         // No action block found, task complete!
+        if (window.aiTaskHUD) window.aiTaskHUD.done('Task completed ✓');
         break;
       }
 
       const { action, action_input } = parsedAction;
       const thought = action_input.thought || '';
+      
+      // Show HUD step for this action
+      let hudStepId = null;
+      if (window.aiTaskHUD) {
+        if (step === 0) window.aiTaskHUD.start(`AI Task — Step ${step + 1}`);
+        else if (hudStepId !== null) window.aiTaskHUD.updateStep(hudStepId, 'done');
+        const actionLabel = action === 'browser-action' ? action_input.command : 'Page Script';
+        hudStepId = window.aiTaskHUD.addStep(`Step ${step + 1}: ${actionLabel}`, 'running');
+      }
       
       let executionResult = null;
 
@@ -936,6 +961,30 @@
             if (!key) throw new Error("Missing key parameter");
             const val = aiMemory[key];
             executionResult = { success: true, result: { key, value: val !== undefined ? val : null } };
+          } else if (command === 'get-persona') {
+            const dataStr = localStorage.getItem('devilbrowser-persona');
+            const data = dataStr ? JSON.parse(dataStr) : {};
+            executionResult = { success: true, result: data };
+          } else if (command === 'search-credential') {
+            const targetDomain = params?.domain ? params.domain.toLowerCase() : '';
+            if (!targetDomain) throw new Error("Missing domain parameter");
+            
+            const listRes = await window.electronAPI.listCredentials();
+            if (listRes.success && listRes.list) {
+              const matched = listRes.list.find(cred => cred.domain.includes(targetDomain) || targetDomain.includes(cred.domain));
+              if (matched) {
+                const getRes = await window.electronAPI.getCredential(matched.key);
+                if (getRes.success && getRes.credential) {
+                  executionResult = { success: true, result: getRes.credential };
+                } else {
+                  throw new Error(getRes.error || "Failed to retrieve decrypted credential details");
+                }
+              } else {
+                executionResult = { success: true, result: null, message: `No credential match found for domain: ${targetDomain}` };
+              }
+            } else {
+              throw new Error(listRes.error || "Failed to list credentials locker contents");
+            }
           } else {
             throw new Error(`Unknown browser command: ${command}`);
           }

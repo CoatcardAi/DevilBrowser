@@ -167,6 +167,14 @@ function renderTabs() {
       }
     });
 
+    // Close tab on middle button click
+    tabDiv.addEventListener('auxclick', (e) => {
+      if (e.button === 1) {
+        e.preventDefault();
+        window.electronAPI.closeTab(tab.id);
+      }
+    });
+
     // Double click to close
     tabDiv.addEventListener('dblclick', () => {
       window.electronAPI.closeTab(tab.id);
@@ -192,6 +200,22 @@ function updateNavigationControls(tab) {
 
 function handleNavigationSubmit(url) {
   if (!url || !activeTabId) return;
+
+  const trimmed = url.trim();
+  if (trimmed.startsWith('ai:') || trimmed.startsWith('?')) {
+    let query = trimmed;
+    if (trimmed.startsWith('ai:')) {
+      query = trimmed.slice(3).trim();
+    } else if (trimmed.startsWith('?')) {
+      query = trimmed.slice(1).trim();
+    }
+    
+    // Dispatch custom event to ai-panel
+    const event = new CustomEvent('ai-address-query', { detail: query });
+    window.dispatchEvent(event);
+    return;
+  }
+
   window.electronAPI.navigateTab({ tabId: activeTabId, url });
 }
 
@@ -403,11 +427,37 @@ bookmarksSearchInput.addEventListener('input', renderBookmarksManager);
 
 function updateDownloadBadge() {
   const activeCount = downloads.filter(d => d.state === 'progressing').length;
+  // Badge number
   if (activeCount > 0) {
     downloadBadge.classList.remove('hidden');
     downloadBadge.innerText = activeCount;
   } else {
     downloadBadge.classList.add('hidden');
+  }
+
+  // Chrome-like circular ring
+  const ring = document.getElementById('dl-ring-progress');
+  if (!ring) return;
+  const CIRCUMFERENCE = 94.25;
+  const activeDl = downloads.find(d => d.state === 'progressing');
+  if (activeDl && activeDl.total > 0) {
+    const pct = activeDl.received / activeDl.total;
+    const offset = CIRCUMFERENCE - pct * CIRCUMFERENCE;
+    ring.classList.remove('hidden', 'complete');
+    ring.style.strokeDashoffset = offset;
+  } else if (activeCount > 0) {
+    // Indeterminate: spin
+    ring.classList.remove('hidden', 'complete');
+    ring.style.strokeDashoffset = CIRCUMFERENCE * 0.3;
+  } else {
+    const justCompleted = downloads.some(d => d.state === 'completed' && Date.now() - (d.completedAt || 0) < 2000);
+    if (justCompleted) {
+      ring.classList.remove('hidden');
+      ring.classList.add('complete');
+      ring.style.strokeDashoffset = 0;
+    } else {
+      ring.classList.add('hidden');
+    }
   }
 }
 
@@ -476,6 +526,46 @@ btnClearDownloads.addEventListener('click', () => {
   renderDownloads();
 });
 
+// Expose addCompletedDownload for other modules (ai-image, ai-tools etc.)
+window.addCompletedDownload = function({ fileName, filePath }) {
+  const id = 'direct_' + Date.now() + Math.random().toString(36).substr(2, 4);
+  const entry = {
+    id,
+    fileName: fileName || filePath.replace(/\\/g, '/').split('/').pop() || 'file',
+    received: 1,
+    total: 1,
+    state: 'completed',
+    savePath: filePath,
+    completedAt: Date.now()
+  };
+  downloads.unshift(entry);
+  updateDownloadBadge();
+  renderDownloads();
+  // Briefly show panel so user knows the file was saved
+  if (downloadsPanel && downloadsPanel.classList.contains('hidden')) {
+    downloadsPanel.classList.remove('hidden');
+    updateLayout();
+    setTimeout(() => {
+      // Hide after 3 seconds unless user interacted
+      if (!downloadsPanel._userOpened) {
+        downloadsPanel.classList.add('hidden');
+        updateLayout();
+      }
+    }, 3000);
+  }
+  // Flash complete ring for 2s
+  const ring = document.getElementById('dl-ring-progress');
+  if (ring) {
+    ring.classList.remove('hidden');
+    ring.classList.add('complete');
+    ring.style.strokeDashoffset = 0;
+    setTimeout(() => {
+      ring.classList.add('hidden');
+      ring.classList.remove('complete');
+    }, 2000);
+  }
+};
+
 // ----------------------------------------------------
 // System Settings Logic
 // ----------------------------------------------------
@@ -538,7 +628,34 @@ async function loadPreferences() {
   } catch (err) {
     console.error('Error syncing mic routing source:', err);
   }
+
+  // Load Download Location
+  try {
+    const dirPathEl = document.getElementById('download-dir-path');
+    if (dirPathEl && window.electronAPI.getDownloadDirectory) {
+      const dir = await window.electronAPI.getDownloadDirectory();
+      dirPathEl.textContent = dir;
+      dirPathEl.title = dir;
+    }
+  } catch (err) {
+    console.error('Failed to load download directory:', err);
+  }
 }
+
+// Change download folder button
+document.addEventListener('click', async (e) => {
+  if (e.target && e.target.id === 'btn-change-download-dir') {
+    const result = await window.electronAPI.selectDownloadDirectory();
+    if (!result.canceled) {
+      const dirPathEl = document.getElementById('download-dir-path');
+      if (dirPathEl) {
+        dirPathEl.textContent = result.path;
+        dirPathEl.title = result.path;
+      }
+      showToastNotification('✅ Download folder updated!');
+    }
+  }
+});
 
 function updateContentProtectionUI(enabled) {
   if (enabled) {
@@ -691,7 +808,8 @@ btnResetShortcuts.addEventListener('click', async () => {
     'dev-tools': 'Control+Shift+i',
     'add-bookmark': 'Control+d',
     'toggle-adblocker': 'Control+Shift+A',
-    'toggle-always-ontop': 'Control+Shift+P'
+    'toggle-always-ontop': 'Control+Shift+P',
+    'toggle-window': 'Alt+B'
   };
   await window.electronAPI.savePreferences(preferences);
   renderShortcuts();
@@ -823,10 +941,12 @@ async function startAudioRouting(skipIPC = false) {
     btnDisableRouting.disabled = false;
     selectVirtualDevice.disabled = true;
 
-    btnMicRoutingToggle.classList.add('active');
-    btnMicRoutingToggle.querySelector('.mic-icon-mic').classList.add('hidden');
-    btnMicRoutingToggle.querySelector('.mic-icon-routing').classList.remove('hidden');
-    btnMicRoutingToggle.title = 'Microphone set to Laptop Output (System Loopback). Click to switch to Mic.';
+    if (btnMicRoutingToggle) {
+      btnMicRoutingToggle.classList.add('active');
+      btnMicRoutingToggle.querySelector('.mic-icon-mic').classList.add('hidden');
+      btnMicRoutingToggle.querySelector('.mic-icon-routing').classList.remove('hidden');
+      btnMicRoutingToggle.title = 'Microphone set to Laptop Output (System Loopback). Click to switch to Mic.';
+    }
 
     if (!skipIPC) {
       await window.electronAPI.setMicRoutingSource('system');
@@ -838,10 +958,12 @@ async function startAudioRouting(skipIPC = false) {
     routingStatusText.className = 'status-indicator inactive';
     routingSourceText.innerText = 'None';
 
-    btnMicRoutingToggle.classList.remove('active');
-    btnMicRoutingToggle.querySelector('.mic-icon-mic').classList.remove('hidden');
-    btnMicRoutingToggle.querySelector('.mic-icon-routing').classList.add('hidden');
-    btnMicRoutingToggle.title = 'Switch Microphone to Laptop Output';
+    if (btnMicRoutingToggle) {
+      btnMicRoutingToggle.classList.remove('active');
+      btnMicRoutingToggle.querySelector('.mic-icon-mic').classList.remove('hidden');
+      btnMicRoutingToggle.querySelector('.mic-icon-routing').classList.add('hidden');
+      btnMicRoutingToggle.title = 'Switch Microphone to Laptop Output';
+    }
 
     if (!skipIPC) {
       await window.electronAPI.setMicRoutingSource('mic');
@@ -867,10 +989,12 @@ function stopAudioRouting(skipIPC = false) {
   btnDisableRouting.disabled = true;
   selectVirtualDevice.disabled = false;
 
-  btnMicRoutingToggle.classList.remove('active');
-  btnMicRoutingToggle.querySelector('.mic-icon-mic').classList.remove('hidden');
-  btnMicRoutingToggle.querySelector('.mic-icon-routing').classList.add('hidden');
-  btnMicRoutingToggle.title = 'Switch Microphone to Laptop Output';
+  if (btnMicRoutingToggle) {
+    btnMicRoutingToggle.classList.remove('active');
+    btnMicRoutingToggle.querySelector('.mic-icon-mic').classList.remove('hidden');
+    btnMicRoutingToggle.querySelector('.mic-icon-routing').classList.add('hidden');
+    btnMicRoutingToggle.title = 'Switch Microphone to Laptop Output';
+  }
 
   if (!skipIPC) {
     window.electronAPI.setMicRoutingSource('mic');
@@ -885,14 +1009,16 @@ btnDisableRouting.addEventListener('click', () => {
   stopAudioRouting();
 });
 
-btnMicRoutingToggle.addEventListener('click', () => {
-  audioRoutingPopover.classList.toggle('hidden');
-  settingsPanel.classList.add('hidden');
-  downloadsPanel.classList.add('hidden');
-  bookmarksPanel.classList.add('hidden');
-  updateAudioRoutingUIForActiveTab();
-  updateLayout();
-});
+if (btnMicRoutingToggle) {
+  btnMicRoutingToggle.addEventListener('click', () => {
+    audioRoutingPopover.classList.toggle('hidden');
+    settingsPanel.classList.add('hidden');
+    downloadsPanel.classList.add('hidden');
+    bookmarksPanel.classList.add('hidden');
+    updateAudioRoutingUIForActiveTab();
+    updateLayout();
+  });
+}
 
 // ----------------------------------------------------
 // Window Layout and Margin Management
@@ -905,7 +1031,7 @@ function updateLayout() {
   if (height < 50) {
     const bookmarksBar = document.getElementById('bookmarks-bar');
     const isBookmarksVisible = bookmarksBar && !bookmarksBar.classList.contains('hidden');
-    height = isBookmarksVisible ? 138 : 104;
+    height = isBookmarksVisible ? 110 : 82;
   }
   
   document.documentElement.style.setProperty('--topbar-height', height + 'px');
@@ -946,6 +1072,8 @@ function updateLayout() {
   
   window.electronAPI.updateLayoutMargins({ height, rightMargin });
 }
+
+window.updateLayout = updateLayout;
 
 function makePanelResizable(panel) {
   if (!panel) return;
@@ -1008,17 +1136,47 @@ setTimeout(() => {
 
 
 // ----------------------------------------------------
+// Side Panels Drawer Coordinator
+// ----------------------------------------------------
+function closeAllSidePanels(exceptId = null) {
+  const panels = [
+    { id: 'settings-panel', el: document.getElementById('settings-panel'), class: 'hidden', addClass: true },
+    { id: 'downloads-panel', el: document.getElementById('downloads-panel'), class: 'hidden', addClass: true },
+    { id: 'bookmarks-panel', el: document.getElementById('bookmarks-panel'), class: 'hidden', addClass: true },
+    { id: 'ai-panel', el: document.getElementById('ai-panel'), class: 'open', addClass: false },
+    { id: 'ai-tools-panel', el: document.getElementById('ai-tools-panel'), class: 'open', addClass: false },
+    { id: 'ai-history-panel', el: document.getElementById('ai-history-panel'), class: 'open', addClass: false },
+    { id: 'ai-image-panel', el: document.getElementById('ai-image-panel'), class: 'open', addClass: false }
+  ];
+
+  panels.forEach(p => {
+    if (p.el && p.id !== exceptId) {
+      if (p.addClass) {
+        p.el.classList.add(p.class);
+      } else {
+        p.el.classList.remove(p.class);
+      }
+    }
+  });
+
+  // Remove active styling on toggle buttons when closing respective panels
+  const btnAiToggle = document.getElementById('btn-ai-toggle');
+  if (btnAiToggle && exceptId !== 'ai-panel') btnAiToggle.classList.remove('active');
+}
+window.closeAllSidePanels = closeAllSidePanels;
+
+// ----------------------------------------------------
 // Window Slide Panel Panel Toggles
 // ----------------------------------------------------
 
 btnSettings.addEventListener('click', () => {
   const isOpening = settingsPanel.classList.contains('hidden');
-  settingsPanel.classList.toggle('hidden');
-  downloadsPanel.classList.add('hidden');
-  bookmarksPanel.classList.add('hidden');
-  audioRoutingPopover.classList.add('hidden');
   if (isOpening) {
+    closeAllSidePanels('settings-panel');
+    settingsPanel.classList.remove('hidden');
     updateAccountUI();
+  } else {
+    settingsPanel.classList.add('hidden');
   }
   updateLayout();
 });
@@ -1028,11 +1186,14 @@ btnCloseSettings.addEventListener('click', () => {
 });
 
 btnDownloadsToggle.addEventListener('click', () => {
-  downloadsPanel.classList.toggle('hidden');
-  settingsPanel.classList.add('hidden');
-  bookmarksPanel.classList.add('hidden');
-  audioRoutingPopover.classList.add('hidden');
-  renderDownloads();
+  const isOpening = downloadsPanel.classList.contains('hidden');
+  if (isOpening) {
+    closeAllSidePanels('downloads-panel');
+    downloadsPanel.classList.remove('hidden');
+    renderDownloads();
+  } else {
+    downloadsPanel.classList.add('hidden');
+  }
   updateLayout();
 });
 btnCloseDownloads.addEventListener('click', () => {
@@ -1041,11 +1202,14 @@ btnCloseDownloads.addEventListener('click', () => {
 });
 
 btnBookmarksToggle.addEventListener('click', () => {
-  bookmarksPanel.classList.toggle('hidden');
-  settingsPanel.classList.add('hidden');
-  downloadsPanel.classList.add('hidden');
-  audioRoutingPopover.classList.add('hidden');
-  loadBookmarks();
+  const isOpening = bookmarksPanel.classList.contains('hidden');
+  if (isOpening) {
+    closeAllSidePanels('bookmarks-panel');
+    bookmarksPanel.classList.remove('hidden');
+    loadBookmarks();
+  } else {
+    bookmarksPanel.classList.add('hidden');
+  }
   updateLayout();
 });
 btnCloseBookmarks.addEventListener('click', () => {
@@ -1234,9 +1398,11 @@ window.electronAPI.on('mic-routing-source-changed', async (source) => {
 
 async function updateAudioRoutingUIForActiveTab() {
   if (!activeTabId) {
-    btnMicRoutingToggle.classList.remove('active');
-    btnMicRoutingToggle.querySelector('.mic-icon-mic').classList.remove('hidden');
-    btnMicRoutingToggle.querySelector('.mic-icon-routing').classList.add('hidden');
+    if (btnMicRoutingToggle) {
+      btnMicRoutingToggle.classList.remove('active');
+      btnMicRoutingToggle.querySelector('.mic-icon-mic').classList.remove('hidden');
+      btnMicRoutingToggle.querySelector('.mic-icon-routing').classList.add('hidden');
+    }
     statusRouting.innerText = 'Audio Routing: Inactive';
     statusRouting.classList.remove('active');
     return;
@@ -1258,18 +1424,22 @@ async function updateAudioRoutingUIForActiveTab() {
   }
 
   if (resolved.enabled) {
-    btnMicRoutingToggle.classList.add('active');
-    btnMicRoutingToggle.querySelector('.mic-icon-mic').classList.add('hidden');
-    btnMicRoutingToggle.querySelector('.mic-icon-routing').classList.remove('hidden');
-    btnMicRoutingToggle.title = `Audio routing active: ${resolved.source}. Click to configure.`;
+    if (btnMicRoutingToggle) {
+      btnMicRoutingToggle.classList.add('active');
+      btnMicRoutingToggle.querySelector('.mic-icon-mic').classList.add('hidden');
+      btnMicRoutingToggle.querySelector('.mic-icon-routing').classList.remove('hidden');
+      btnMicRoutingToggle.title = `Audio routing active: ${resolved.source}. Click to configure.`;
+    }
     
     statusRouting.innerText = `Audio Routing: Active (${resolved.source})`;
     statusRouting.classList.add('active');
   } else {
-    btnMicRoutingToggle.classList.remove('active');
-    btnMicRoutingToggle.querySelector('.mic-icon-mic').classList.remove('hidden');
-    btnMicRoutingToggle.querySelector('.mic-icon-routing').classList.add('hidden');
-    btnMicRoutingToggle.title = 'Switch Microphone to Laptop Output / Virtual Audio Injection. Click to configure.';
+    if (btnMicRoutingToggle) {
+      btnMicRoutingToggle.classList.remove('active');
+      btnMicRoutingToggle.querySelector('.mic-icon-mic').classList.remove('hidden');
+      btnMicRoutingToggle.querySelector('.mic-icon-routing').classList.add('hidden');
+      btnMicRoutingToggle.title = 'Switch Microphone to Laptop Output / Virtual Audio Injection. Click to configure.';
+    }
     
     statusRouting.innerText = 'Audio Routing: Inactive';
     statusRouting.classList.remove('active');
@@ -1454,9 +1624,18 @@ window.electronAPI.on('download-completed', (data) => {
   if (dl) {
     dl.state = data.state;
     dl.received = dl.total;
+    dl.completedAt = Date.now();
   }
   updateDownloadBadge();
   renderDownloads();
+  // Flash ring green for 2s on completion
+  const ring = document.getElementById('dl-ring-progress');
+  if (ring && data.state === 'completed') {
+    ring.classList.remove('hidden');
+    ring.classList.add('complete');
+    ring.style.strokeDashoffset = 0;
+    setTimeout(() => { ring.classList.add('hidden'); ring.classList.remove('complete'); }, 2000);
+  }
 });
 
 // ----------------------------------------------------
@@ -1562,6 +1741,156 @@ if (btnSignOut) {
   });
 }
 
+// --- SECURE VAULT & PERSONA MANAGEMENT CONTROLLERS ---
+let elsVault = {};
+
+function savePersona() {
+  const data = {
+    name: elsVault.personaName ? elsVault.personaName.value.trim() : '',
+    email: elsVault.personaEmail ? elsVault.personaEmail.value.trim() : '',
+    phone: elsVault.personaPhone ? elsVault.personaPhone.value.trim() : '',
+    location: elsVault.personaLocation ? elsVault.personaLocation.value.trim() : '',
+    skills: elsVault.personaSkills ? elsVault.personaSkills.value.trim() : '',
+    summary: elsVault.personaSummary ? elsVault.personaSummary.value.trim() : '',
+    resumeName: (elsVault.resumeFile && elsVault.resumeFile.files && elsVault.resumeFile.files[0]) ? elsVault.resumeFile.files[0].name : (elsVault.resumeStatus ? elsVault.resumeStatus.innerText.replace('Resume: ', '') : '')
+  };
+  if (data.resumeName === 'None Loaded') data.resumeName = '';
+
+  localStorage.setItem('devilbrowser-persona', JSON.stringify(data));
+  showToastNotification('Persona Vault updated successfully');
+}
+
+function loadPersona() {
+  try {
+    const dataStr = localStorage.getItem('devilbrowser-persona');
+    if (dataStr) {
+      const data = JSON.parse(dataStr);
+      if (elsVault.personaName) elsVault.personaName.value = data.name || '';
+      if (elsVault.personaEmail) elsVault.personaEmail.value = data.email || '';
+      if (elsVault.personaPhone) elsVault.personaPhone.value = data.phone || '';
+      if (elsVault.personaLocation) elsVault.personaLocation.value = data.location || '';
+      if (elsVault.personaSkills) elsVault.personaSkills.value = data.skills || '';
+      if (elsVault.personaSummary) elsVault.personaSummary.value = data.summary || '';
+      if (data.resumeName) {
+        if (elsVault.resumeStatus) elsVault.resumeStatus.innerText = "Resume: " + data.resumeName;
+      }
+    }
+  } catch (e) {
+    console.error('Failed to load persona data:', e);
+  }
+}
+
+async function loadCredentials() {
+  if (!elsVault.credentialsList) return;
+  try {
+    const res = await window.electronAPI.listCredentials();
+    if (res.success && res.list) {
+      if (res.list.length === 0) {
+        elsVault.credentialsList.innerHTML = `<div class="no-credentials" style="font-size: 11px; color: var(--text-faint); font-style: italic; padding: 4px;">No logins stored yet.</div>`;
+        return;
+      }
+      elsVault.credentialsList.innerHTML = res.list.map(cred => `
+        <div class="credential-item" style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.15); padding: 6px 8px; border-radius: 4px; border: 1px solid var(--border);">
+          <div style="display: flex; flex-direction: column; gap: 2px; overflow: hidden; width: calc(100% - 60px);">
+            <span style="font-size: 11px; font-weight: bold; color: var(--text-primary); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${cred.domain}</span>
+            <span style="font-size: 10px; color: var(--text-muted); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${cred.username}</span>
+          </div>
+          <button class="delete-cred-btn danger-btn-outline" data-key="${cred.key}" style="padding: 3px 6px; font-size: 10px; min-width: auto; height: auto;">Delete</button>
+        </div>
+      `).join('');
+
+      // Attach delete handlers
+      const deleteBtns = elsVault.credentialsList.querySelectorAll('.delete-cred-btn');
+      deleteBtns.forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          const key = e.target.getAttribute('data-key');
+          if (confirm(`Are you sure you want to delete the stored login for ${key.split(':')[0]}?`)) {
+            const delRes = await window.electronAPI.deleteCredential(key);
+            if (delRes.success) {
+              showToastNotification('Credential deleted');
+              loadCredentials();
+            } else {
+              alert('Failed to delete credential: ' + delRes.error);
+            }
+          }
+        });
+      });
+    } else {
+      elsVault.credentialsList.innerHTML = `<div style="font-size: 11px; color: var(--rose); padding: 4px;">Error: ${res.error}</div>`;
+    }
+  } catch (e) {
+    console.error('Failed to load credentials:', e);
+  }
+}
+
+async function saveCredential() {
+  const domain = elsVault.credDomain ? elsVault.credDomain.value.trim() : '';
+  const username = elsVault.credUsername ? elsVault.credUsername.value.trim() : '';
+  const password = elsVault.credPassword ? elsVault.credPassword.value : '';
+
+  if (!domain || !username || !password) {
+    alert('Please fill out all fields (Domain, Username, Password)');
+    return;
+  }
+
+  try {
+    const res = await window.electronAPI.saveCredential({ domain, username, password });
+    if (res.success) {
+      showToastNotification('Secure login added successfully');
+      if (elsVault.credDomain) elsVault.credDomain.value = '';
+      if (elsVault.credUsername) elsVault.credUsername.value = '';
+      if (elsVault.credPassword) elsVault.credPassword.value = '';
+      loadCredentials();
+    } else {
+      alert('Failed to save credential: ' + res.error);
+    }
+  } catch (err) {
+    console.error('Failed to save credential:', err);
+  }
+}
+
+function initSettingsVault() {
+  elsVault = {
+    personaName: document.getElementById('persona-name'),
+    personaEmail: document.getElementById('persona-email'),
+    personaPhone: document.getElementById('persona-phone'),
+    personaLocation: document.getElementById('persona-location'),
+    personaSkills: document.getElementById('persona-skills'),
+    personaSummary: document.getElementById('persona-summary'),
+    resumeStatus: document.getElementById('resume-status'),
+    resumeFile: document.getElementById('persona-resume-file'),
+    btnUploadResume: document.getElementById('btn-upload-resume'),
+    btnSavePersona: document.getElementById('btn-save-persona'),
+    
+    credDomain: document.getElementById('cred-domain'),
+    credUsername: document.getElementById('cred-username'),
+    credPassword: document.getElementById('cred-password'),
+    btnSaveCredential: document.getElementById('btn-save-credential'),
+    credentialsList: document.getElementById('credentials-list')
+  };
+
+  if (elsVault.btnUploadResume && elsVault.resumeFile) {
+    elsVault.btnUploadResume.addEventListener('click', () => elsVault.resumeFile.click());
+  }
+  if (elsVault.resumeFile) {
+    elsVault.resumeFile.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        const file = e.target.files[0];
+        if (elsVault.resumeStatus) elsVault.resumeStatus.innerText = "Resume: " + file.name;
+      }
+    });
+  }
+  if (elsVault.btnSavePersona) {
+    elsVault.btnSavePersona.addEventListener('click', savePersona);
+  }
+  if (elsVault.btnSaveCredential) {
+    elsVault.btnSaveCredential.addEventListener('click', saveCredential);
+  }
+
+  loadPersona();
+  loadCredentials();
+}
+
 async function init() {
   initClock();
   watchTopbarHeight();
@@ -1573,6 +1902,7 @@ async function init() {
   if (window.aiAuth) {
     await window.aiAuth.init();
   }
+  initSettingsVault();
 }
 
 document.addEventListener('DOMContentLoaded', init);

@@ -22,6 +22,11 @@
         return;
       }
       if (!panel) return;
+
+      if (window.closeAllSidePanels) {
+        window.closeAllSidePanels('ai-tools-panel');
+      }
+
       panel.classList.add('open');
       updateLayout();
       await loadTools();
@@ -124,8 +129,15 @@
         btn.disabled = true;
         btn.textContent = 'Downloading...';
         try {
-          await window.electronAPI.aiDownloadTool(tool.id, tool.file_name || tool.name + '.zip', tool.type);
+          const res = await window.electronAPI.aiDownloadTool(tool.id, tool.file_name || tool.name + '.zip', tool.type);
           btn.textContent = '✓ Done';
+          // Log to downloads panel
+          if (res && res.success && window.addCompletedDownload) {
+            window.addCompletedDownload({
+              fileName: res.filename || (tool.file_name || tool.name + '.zip'),
+              filePath: res.filePath || ''
+            });
+          }
           setTimeout(() => {
             btn.disabled = false;
             btn.textContent = tool.type === 'external' ? '🔗 Open' : '⬇️ Download';

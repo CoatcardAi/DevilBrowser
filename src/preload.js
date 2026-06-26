@@ -73,6 +73,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   pauseDownload: (id) => ipcRenderer.invoke('pause-download', id),
   resumeDownload: (id) => ipcRenderer.invoke('resume-download', id),
   cancelDownload: (id) => ipcRenderer.invoke('cancel-download', id),
+  getDownloadDirectory: () => ipcRenderer.invoke('get-download-directory'),
+  selectDownloadDirectory: () => ipcRenderer.invoke('select-download-directory'),
 
   // ── AI Auth ──
   aiLogin:      (email) => ipcRenderer.invoke('ai-login', email),
@@ -80,6 +82,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   aiLogout:     () => ipcRenderer.invoke('ai-logout'),
   aiGetMe:      () => ipcRenderer.invoke('ai-get-me'),
   aiGetToken:   () => ipcRenderer.invoke('ai-get-token'),
+
+  // ── Secure Credentials Vault ──
+  saveCredential: (payload) => ipcRenderer.invoke('save-credential', payload),
+  listCredentials: () => ipcRenderer.invoke('list-credentials'),
+  getCredential: (key) => ipcRenderer.invoke('get-credential', key),
+  deleteCredential: (key) => ipcRenderer.invoke('delete-credential', key),
 
   // ── AI Generation ──
   aiGenerate:       (payload) => ipcRenderer.invoke('ai-generate', payload),
@@ -90,7 +98,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   aiGetPageText:    (tabId) => ipcRenderer.invoke('ai-get-page-text', tabId),
   aiGetPageDOM:     (tabId) => ipcRenderer.invoke('ai-get-page-dom', tabId),
   aiExecutePageAction: (script, tabId) => ipcRenderer.invoke('ai-execute-page-action', { script, tabId }),
-  aiGetPageScreenshot: () => ipcRenderer.invoke('ai-get-page-screenshot'),
+  aiGetPageScreenshot: (tabId) => ipcRenderer.invoke('ai-get-page-screenshot', tabId),
   aiAnalyseDocument: (filePath, mimeType, name) => ipcRenderer.invoke('ai-analyse-document', { filePath, mimeType, name }),
   saveImage: (payload) => ipcRenderer.invoke('save-image', payload),
   aiSaveFile: (filename, content) => ipcRenderer.invoke('ai-save-file', { filename, content }),
@@ -98,6 +106,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   aiRestoreState: () => ipcRenderer.invoke('ai-restore-state'),
   aiDownloadFile: (url) => ipcRenderer.invoke('ai-download-file', url),
   aiBatchGenerate: (payload) => ipcRenderer.invoke('ai-batch-generate', payload),
+  aiGetTickets: () => ipcRenderer.invoke('ai-get-tickets'),
+  aiSubmitTicket: (payload) => ipcRenderer.invoke('ai-submit-ticket', payload),
+
+  // CDP input simulator APIs
+  aiCDPClick: (payload) => ipcRenderer.invoke('ai-cdp-click', payload),
+  aiCDPType: (payload) => ipcRenderer.invoke('ai-cdp-type', payload),
+  aiCDPPressKey: (payload) => ipcRenderer.invoke('ai-cdp-press-key', payload),
+  aiIsTabLoading: (tabId) => ipcRenderer.invoke('ai-is-tab-loading', tabId),
+  aiSetWorkerTab: (tabId) => ipcRenderer.invoke('ai-set-worker-tab', tabId),
 
   // ── AI Tools Marketplace ──
   aiGetTools:     () => ipcRenderer.invoke('ai-get-tools'),

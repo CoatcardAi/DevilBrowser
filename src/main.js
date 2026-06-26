@@ -1,7 +1,42 @@
-const { app, BrowserWindow, BrowserView, ipcMain, Menu, dialog, session, desktopCapturer, Tray, globalShortcut, nativeImage } = require('electron');
+const { app, BrowserWindow, BrowserView, ipcMain, Menu, dialog, session, desktopCapturer, Tray, globalShortcut, nativeImage, safeStorage } = require('electron');
 const path = require('path');
+
+// Enforce single instance lock to prevent cache/DB resource access conflicts
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+  process.exit(0);
+}
+
+app.on('second-instance', (event, commandLine, workingDirectory) => {
+  // Focus the main window of the primary instance
+  for (const entry of windows.values()) {
+    if (entry.win) {
+      if (entry.win.isMinimized()) entry.win.restore();
+      entry.win.show();
+      entry.win.focus();
+      break;
+    }
+  }
+});
+
 const Store = require('electron-store');
 const { execFile } = require('child_process');
+const fs = require('fs');
+const https = require('https');
+const http  = require('http');
+
+function getUniqueSavePath(dir, filename) {
+  const ext = path.extname(filename);
+  const base = path.basename(filename, ext);
+  let filePath = path.join(dir, filename);
+  let counter = 1;
+  while (fs.existsSync(filePath)) {
+    filePath = path.join(dir, `${base} (${counter})${ext}`);
+    counter++;
+  }
+  return filePath;
+}
 
 const store = new Store({ name: 'user-preferences' });
 
@@ -189,8 +224,12 @@ function toggleWindowVisibility() {
 }
 
 function registerGlobalToggleShortcut() {
-  const shortcuts = store.get('shortcuts', {});
-  const toggleShortcut = shortcuts['toggle-window'] || 'Control+B';
+  let shortcuts = store.get('shortcuts', {});
+  if (!shortcuts['toggle-window'] || shortcuts['toggle-window'] === 'Control+B') {
+    shortcuts['toggle-window'] = 'Alt+B';
+    store.set('shortcuts', shortcuts);
+  }
+  const toggleShortcut = shortcuts['toggle-window'];
   
   try {
     globalShortcut.unregisterAll();
@@ -205,7 +244,7 @@ function registerGlobalToggleShortcut() {
   } catch (e) {
     console.error(`Failed to register global shortcut ${toggleShortcut}:`, e);
     try {
-      globalShortcut.register('Control+B', () => {
+      globalShortcut.register('Alt+B', () => {
         toggleWindowVisibility();
       });
     } catch (e2) {}
@@ -283,7 +322,7 @@ function createMainWindow(isIncognito = false) {
     tabs: [],
     activeTabId: null,
     closedTabsHistory: [],
-    toolbarHeight: 138,
+    toolbarHeight: 110,
     rightMargin: 0
   });
 
@@ -374,6 +413,17 @@ function updateActiveViewBounds(winId) {
       width: bounds.width - rightOffset,
       height: bounds.height - topOffset
     });
+  }
+
+  // Position worker tab off-screen if it exists and is not the active tab
+  if (data.workerTabId && data.workerTabId !== data.activeTabId) {
+    const workerTab = data.tabs.find(t => t.id === data.workerTabId);
+    if (workerTab) {
+      try {
+        data.win.addBrowserView(workerTab.view);
+      } catch (e) {}
+      workerTab.view.setBounds({ x: -2500, y: -2500, width: 1024, height: 768 });
+    }
   }
 }
 
@@ -509,7 +559,8 @@ function setActiveTab(winId, tabId) {
   
   const currentViews = data.win.getBrowserViews();
   currentViews.forEach(v => {
-    if (v !== targetTab.view) {
+    const isWorker = data.workerTabId && data.tabs.find(t => t.id === data.workerTabId && t.view === v);
+    if (v !== targetTab.view && !isWorker) {
       data.win.removeBrowserView(v);
     }
   });
@@ -547,6 +598,10 @@ function closeTab(winId, tabId) {
   if (idx === -1) return;
 
   const [removedTab] = data.tabs.splice(idx, 1);
+
+  if (data.workerTabId === tabId) {
+    data.workerTabId = null;
+  }
   
   // Clean up audio settings
   tabAudioSettings.delete(tabId);
@@ -789,7 +844,7 @@ function handleShortcutAction(winEntry, accelerator) {
     'add-bookmark': 'Control+d',
     'toggle-adblocker': 'Control+Shift+A',
     'toggle-always-ontop': 'Control+Shift+P',
-    'toggle-window': 'Control+B'
+    'toggle-window': 'Alt+B'
   });
   
   const action = Object.keys(shortcuts).find(key => {
@@ -987,7 +1042,7 @@ ipcMain.handle('get-preferences', () => ({
     'add-bookmark': 'Control+d',
     'toggle-adblocker': 'Control+Shift+A',
     'toggle-always-ontop': 'Control+Shift+P',
-    'toggle-window': 'Control+B'
+    'toggle-window': 'Alt+B'
   }),
   permissions: store.get('permissions', {
     media: true,
@@ -1203,14 +1258,28 @@ ipcMain.handle('cancel-download', (e, id) => {
   return false;
 });
 
+ipcMain.handle('get-download-directory', () => {
+  return store.get('downloadDirectory') || app.getPath('downloads');
+});
+
+ipcMain.handle('select-download-directory', async (e) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Choose Download Folder',
+    defaultPath: store.get('downloadDirectory') || app.getPath('downloads'),
+    properties: ['openDirectory', 'createDirectory']
+  });
+  if (result.canceled || !result.filePaths.length) return { canceled: true };
+  const newDir = result.filePaths[0];
+  store.set('downloadDirectory', newDir);
+  return { canceled: false, path: newDir };
+});
+
 // ----------------------------------------------------
 // AI Integration — IPC Handlers
 // ----------------------------------------------------
 
 const AI_BASE = 'https://aimagicbackend.onrender.com';
-const https = require('https');
-const http  = require('http');
-const fs    = require('fs');
 
 /** Simple promisified HTTP/HTTPS request (returns parsed JSON) */
 function aiFetch(method, path, body, token) {
@@ -1340,24 +1409,15 @@ ipcMain.handle('ai-generate', async (e, payload) => {
 });
 
 ipcMain.handle('save-image', async (e, { base64Data, defaultFilename }) => {
+  if (!isAuthorizedSender(e.sender)) return { success: false, error: 'Unauthorized IPC access.' };
   try {
-    const win = BrowserWindow.fromWebContents(e.sender);
-    if (!win) return { success: false, error: 'Window not found' };
-    
-    const { canceled, filePath } = await dialog.showSaveDialog(win, {
-      defaultPath: path.join(app.getPath('downloads'), defaultFilename || 'generated-image.png'),
-      filters: [
-        { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }
-      ]
-    });
-    
-    if (canceled || !filePath) {
-      return { success: false, error: 'Canceled' };
-    }
-    
+    const downloadDir = store.get('downloadDirectory') || app.getPath('downloads');
+    const safeFilename = (defaultFilename || 'generated-image.png').replace(/[^a-zA-Z0-9_.-]/g, '_');
+    const filePath = getUniqueSavePath(downloadDir, safeFilename);
+
     const buffer = Buffer.from(base64Data, 'base64');
     fs.writeFileSync(filePath, buffer);
-    return { success: true, filePath };
+    return { success: true, filePath, filename: path.basename(filePath) };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -1463,6 +1523,32 @@ ipcMain.handle('ai-get-page-text', async (e, tabId) => {
   } catch { return ''; }
 });
 
+async function executeWithAttachedView(winEntry, tab, fn) {
+  if (!winEntry || !tab || !tab.view) return await fn();
+  const win = winEntry.win;
+  const isAttached = win.getBrowserViews().includes(tab.view);
+  if (!isAttached) {
+    try {
+      win.addBrowserView(tab.view);
+      tab.view.setBounds({ x: -2000, y: -2000, width: 1024, height: 768 });
+      await new Promise(r => setTimeout(r, 100));
+    } catch (e) {
+      console.error('Failed to temporarily attach BrowerView:', e);
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    if (!isAttached) {
+      try {
+        win.removeBrowserView(tab.view);
+      } catch (e) {
+        console.error('Failed to detach BrowerView:', e);
+      }
+    }
+  }
+}
+
 ipcMain.handle('ai-get-page-dom', async (e, tabId) => {
   const winEntry = getWindowEntry(e.sender);
   if (!winEntry) return '[]';
@@ -1471,77 +1557,211 @@ ipcMain.handle('ai-get-page-dom', async (e, tabId) => {
   const tab = winEntry.tabs.find(t => t.id === targetId);
   if (!tab) return '[]';
   try {
-    const domJSON = await tab.view.webContents.executeJavaScript(`
-      (function() {
-        const els = Array.from(document.querySelectorAll('input, textarea, select, button, [role="button"], a'));
-        
-        els.forEach((el, index) => {
-          if (!el.hasAttribute('data-ai-id')) {
-            el.setAttribute('data-ai-id', index.toString());
+    const domJSON = await executeWithAttachedView(winEntry, tab, async () => {
+      return await tab.view.webContents.executeJavaScript(`
+        (function() {
+          const result = [];
+          let currentAiId = 0;
+
+          if (!window.__aiFindElement) {
+            window.__aiFindElement = function(id, root = document) {
+              if (!id) return null;
+              let el = root.querySelector('[data-ai-id="' + id + '"]');
+              if (el) return el;
+              
+              const iframes = Array.from(root.querySelectorAll('iframe'));
+              for (const iframe of iframes) {
+                try {
+                  const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                  el = window.__aiFindElement(id, iframeDoc);
+                  if (el) return el;
+                } catch(e) {}
+              }
+              
+              const all = Array.from(root.querySelectorAll('*'));
+              for (const item of all) {
+                if (item.shadowRoot) {
+                  el = window.__aiFindElement(id, item.shadowRoot);
+                  if (el) return el;
+                }
+              }
+              return null;
+            };
           }
-        });
 
-        if (!window.__aiClick) {
-          window.__aiClick = function(id) {
-            const el = document.querySelector('[data-ai-id="' + id + '"]');
-            if (el) {
-              el.focus();
-              el.click();
-              return true;
-            }
-            return false;
-          };
-        }
-        if (!window.__aiFill) {
-          window.__aiFill = function(id, val) {
-            const el = document.querySelector('[data-ai-id="' + id + '"]');
-            if (el) {
-              el.focus();
-              el.value = val;
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-              return true;
-            }
-            return false;
-          };
-        }
-        if (!window.__aiSelect) {
-          window.__aiSelect = function(id, val) {
-            const el = document.querySelector('[data-ai-id="' + id + '"]');
-            if (el && el.tagName.toLowerCase() === 'select') {
-              el.focus();
-              el.value = val;
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-              return true;
-            }
-            return false;
-          };
-        }
+          if (!window.__aiClick) {
+            window.__aiClick = function(id) {
+              const el = window.__aiFindElement(id);
+              if (el) {
+                el.focus();
+                el.click();
+                return true;
+              }
+              return false;
+            };
+          }
+          if (!window.__aiFill) {
+            window.__aiFill = function(id, val) {
+              const el = window.__aiFindElement(id);
+              if (el) {
+                el.focus();
+                const nativeValueSetter = Object.getOwnPropertyDescriptor(
+                  el.tagName.toLowerCase() === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
+                  'value'
+                );
+                const tracker = el._valueTracker;
 
-        return JSON.stringify(els.map(el => ({
-          aiId: el.getAttribute('data-ai-id'),
-          tagName: el.tagName.toLowerCase(),
-          type: el.type || el.getAttribute('type') || null,
-          id: el.id || null,
-          name: el.name || el.getAttribute('name') || null,
-          href: el.getAttribute('href') || el.href || null,
-          src: el.getAttribute('src') || el.src || null,
-          placeholder: el.placeholder || el.getAttribute('placeholder') || null,
-          labelText: el.labels && el.labels.length > 0 ? el.labels[0].innerText : (el.closest('label') ? el.closest('label').innerText : null),
-          innerText: (el.innerText || '').trim().slice(0, 100),
-          value: el.value || null,
-          role: el.getAttribute('role') || null,
-          ariaLabel: el.getAttribute('aria-label') || null
-        })));
-      })()
-    `);
+                // Clear value
+                if (nativeValueSetter && nativeValueSetter.set) {
+                  nativeValueSetter.set.call(el, '');
+                } else {
+                  el.value = '';
+                }
+                if (tracker) tracker.setValue('');
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+
+                // Set new value
+                if (nativeValueSetter && nativeValueSetter.set) {
+                  nativeValueSetter.set.call(el, val);
+                } else {
+                  el.value = val;
+                }
+                if (tracker) tracker.setValue(val);
+
+                // Dispatch framework events
+                el.dispatchEvent(new Event('keydown', { bubbles: true, cancelable: true }));
+                el.dispatchEvent(new Event('keypress', { bubbles: true, cancelable: true }));
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('keyup', { bubbles: true, cancelable: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
+                return true;
+              }
+              return false;
+            };
+          }
+          if (!window.__aiSelect) {
+            window.__aiSelect = function(id, val) {
+              const el = window.__aiFindElement(id);
+              if (el) {
+                el.focus();
+                if (el.tagName.toLowerCase() === 'select') {
+                  el.value = val;
+                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                  return true;
+                } else {
+                  const nativeValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+                  if (nativeValueSetter && nativeValueSetter.set) {
+                    nativeValueSetter.set.call(el, val);
+                  } else {
+                    el.value = val;
+                  }
+                  el.dispatchEvent(new Event('input', { bubbles: true }));
+                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                  return true;
+                }
+              }
+              return false;
+            };
+          }
+
+          function scanElements(doc, parentFrameName = '', offset = { x: 0, y: 0 }) {
+            if (!doc) return;
+            const els = Array.from(doc.querySelectorAll('input, textarea, select, button, [role="button"], a, [contenteditable="true"], [contenteditable], [role="textbox"]'));
+            
+            els.forEach((el) => {
+              const style = window.getComputedStyle(el);
+              const rect = el.getBoundingClientRect();
+              
+              if (
+                rect.width <= 0 || rect.height <= 0 ||
+                style.display === 'none' ||
+                style.visibility === 'hidden' ||
+                parseFloat(style.opacity) === 0
+              ) {
+                return;
+              }
+              
+              let aiId = el.getAttribute('data-ai-id');
+              if (!aiId) {
+                aiId = String(currentAiId++);
+                el.setAttribute('data-ai-id', aiId);
+              }
+              
+              const label = el.labels && el.labels.length > 0 ? el.labels[0].innerText : (el.closest('label') ? el.closest('label').innerText : null);
+              const x = Math.round(rect.left + rect.width / 2 + offset.x);
+              const y = Math.round(rect.top + rect.height / 2 + offset.y);
+
+              result.push({
+                aiId,
+                tagName: el.tagName.toLowerCase(),
+                type: el.type || el.getAttribute('type') || null,
+                id: el.id || null,
+                name: el.name || el.getAttribute('name') || null,
+                href: el.getAttribute('href') || el.href || null,
+                placeholder: el.placeholder || el.getAttribute('placeholder') || null,
+                labelText: label ? label.trim().slice(0, 100) : null,
+                innerText: (el.innerText || '').trim().slice(0, 100),
+                value: el.value || null,
+                role: el.getAttribute('role') || null,
+                ariaLabel: el.getAttribute('aria-label') || null,
+                frame: parentFrameName || null,
+                rect: {
+                  x: Math.round(rect.left + offset.x),
+                  y: Math.round(rect.top + offset.y),
+                  width: Math.round(rect.width),
+                  height: Math.round(rect.height)
+                },
+                center: { x, y }
+              });
+            });
+
+            const iframes = Array.from(doc.querySelectorAll('iframe'));
+            iframes.forEach((iframe, idx) => {
+              try {
+                const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                const name = iframe.name || iframe.id || 'frame_' + idx;
+                const iframeRect = iframe.getBoundingClientRect();
+                const nextOffset = {
+                  x: offset.x + iframeRect.left,
+                  y: offset.y + iframeRect.top
+                };
+                scanElements(iframeDoc, name, nextOffset);
+              } catch (e) {}
+            });
+            
+            const allEls = Array.from(doc.querySelectorAll('*'));
+            allEls.forEach(e => {
+              if (e.shadowRoot) {
+                scanElements(e.shadowRoot, parentFrameName, offset);
+              }
+            });
+          }
+
+          scanElements(document);
+          return JSON.stringify(result);
+        })()
+      `);
+    });
     return domJSON || '[]';
   } catch (err) {
     return JSON.stringify({ error: err.message });
   }
 });
 
+function isAuthorizedSender(sender) {
+  try {
+    const url = sender.getURL();
+    return url.startsWith('file://') && url.includes('index.html');
+  } catch (e) {
+    return false;
+  }
+}
+
 ipcMain.handle('ai-execute-page-action', async (e, payload) => {
+  if (!isAuthorizedSender(e.sender)) {
+    return { success: false, error: 'Unauthorized IPC access.' };
+  }
   const winEntry = getWindowEntry(e.sender);
   if (!winEntry) return { success: false, error: 'No active window found' };
   
@@ -1553,24 +1773,411 @@ ipcMain.handle('ai-execute-page-action', async (e, payload) => {
   const tab = winEntry.tabs.find(t => t.id === targetId);
   if (!tab) return { success: false, error: 'Tab not found' };
   try {
-    const result = await tab.view.webContents.executeJavaScript(script);
+    const result = await executeWithAttachedView(winEntry, tab, async () => {
+      return await tab.view.webContents.executeJavaScript(script);
+    });
     return { success: true, result };
   } catch (err) {
     return { success: false, error: err.message };
   }
 });
 
+// Track mouse state in main.js
+let lastMouseX = 0;
+let lastMouseY = 0;
+
+async function moveMouseHumanized(dbg, startX, startY, endX, endY) {
+  // Generate a control point for natural curved trajectory
+  const controlX = startX + (endX - startX) / 2 + (Math.random() - 0.5) * 150;
+  const controlY = startY + (endY - startY) / 2 + (Math.random() - 0.5) * 150;
+  
+  const steps = 15;
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    // Quadratic Bezier formula
+    const x = Math.round((1 - t) * (1 - t) * startX + 2 * (1 - t) * t * controlX + t * t * endX);
+    const y = Math.round((1 - t) * (1 - t) * startY + 2 * (1 - t) * t * controlY + t * t * endY);
+    
+    await dbg.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+    await new Promise(r => setTimeout(r, 10 + Math.random() * 8)); // minor delay between move steps
+  }
+}
+
+// Native CDP Debugger helper methods for OS-level input simulation
+async function cdpClick(webContents, x, y) {
+  const dbg = webContents.debugger;
+  const isAttached = dbg.isAttached();
+  if (!isAttached) {
+    dbg.attach();
+  }
+  try {
+    // Humanized Bezier pathing to coordinate
+    await moveMouseHumanized(dbg, lastMouseX, lastMouseY, x, y);
+    lastMouseX = x;
+    lastMouseY = y;
+
+    // Press down
+    await dbg.sendCommand('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+    // Hold click (50ms - 80ms)
+    await new Promise(r => setTimeout(r, 50 + Math.random() * 30));
+    // Release click
+    await dbg.sendCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+    return true;
+  } catch (err) {
+    console.error('CDP click failed:', err);
+    return false;
+  } finally {
+    if (!isAttached) {
+      try { dbg.detach(); } catch (e) {}
+    }
+  }
+}
+
+async function cdpType(webContents, text) {
+  const dbg = webContents.debugger;
+  const isAttached = dbg.isAttached();
+  if (!isAttached) {
+    dbg.attach();
+  }
+  try {
+    // Typist Jitter Simulator (50ms - 150ms delays with keydown/keyup events)
+    for (const char of text) {
+      await dbg.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        text: char,
+        unmodifiedText: char,
+        key: char
+      });
+      await dbg.sendCommand('Input.insertText', { text: char });
+      await dbg.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: char
+      });
+      await new Promise(r => setTimeout(r, 45 + Math.random() * 85));
+    }
+    return true;
+  } catch (err) {
+    console.error('CDP type failed:', err);
+    return false;
+  } finally {
+    if (!isAttached) {
+      try { dbg.detach(); } catch (e) {}
+    }
+  }
+}
+
+async function cdpPressKey(webContents, key) {
+  const dbg = webContents.debugger;
+  const isAttached = dbg.isAttached();
+  if (!isAttached) {
+    dbg.attach();
+  }
+  try {
+    let windowsVirtualKeyCode = 0;
+    let text = '';
+    let code = '';
+    let useChar = false;
+
+    if (key === 'Enter') {
+      windowsVirtualKeyCode = 13;
+      text = '\r';
+      code = 'Enter';
+      useChar = true;
+    } else if (key === 'Backspace') {
+      windowsVirtualKeyCode = 8;
+      code = 'Backspace';
+    } else if (key === 'Tab') {
+      windowsVirtualKeyCode = 9;
+      code = 'Tab';
+    } else if (key === 'Escape') {
+      windowsVirtualKeyCode = 27;
+      code = 'Escape';
+    } else if (key === 'ArrowDown') {
+      windowsVirtualKeyCode = 40;
+      code = 'ArrowDown';
+    } else if (key === 'ArrowUp') {
+      windowsVirtualKeyCode = 38;
+      code = 'ArrowUp';
+    } else if (key === 'ArrowLeft') {
+      windowsVirtualKeyCode = 37;
+      code = 'ArrowLeft';
+    } else if (key === 'ArrowRight') {
+      windowsVirtualKeyCode = 39;
+      code = 'ArrowRight';
+    }
+
+    if (useChar) {
+      await dbg.sendCommand('Input.dispatchKeyEvent', {
+        type: 'rawKeyDown',
+        windowsVirtualKeyCode,
+        key,
+        code,
+        text,
+        unmodifiedText: text
+      });
+      await dbg.sendCommand('Input.dispatchKeyEvent', {
+        type: 'char',
+        windowsVirtualKeyCode,
+        key,
+        code,
+        text,
+        unmodifiedText: text
+      });
+      await dbg.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        windowsVirtualKeyCode,
+        key,
+        code
+      });
+    } else {
+      await dbg.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        windowsVirtualKeyCode,
+        key,
+        code,
+        text,
+        unmodifiedText: text
+      });
+      await dbg.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        windowsVirtualKeyCode,
+        key,
+        code
+      });
+    }
+    return true;
+  } catch (err) {
+    console.error('CDP press key failed:', err);
+    return false;
+  } finally {
+    if (!isAttached) {
+      try { dbg.detach(); } catch (e) {}
+    }
+  }
+}
+
+ipcMain.handle('ai-cdp-click', async (e, { tabId, x, y }) => {
+  if (!isAuthorizedSender(e.sender)) return { success: false, error: 'Unauthorized IPC access.' };
+  const winEntry = getWindowEntry(e.sender);
+  if (!winEntry) return { success: false, error: 'Window not found' };
+  const targetId = tabId || winEntry.activeTabId;
+  const tab = winEntry.tabs.find(t => t.id === targetId);
+  if (!tab) return { success: false, error: 'Tab not found' };
+
+  try {
+    const success = await executeWithAttachedView(winEntry, tab, async () => {
+      return await cdpClick(tab.view.webContents, x, y);
+    });
+    return { success };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ai-cdp-type', async (e, { tabId, text }) => {
+  if (!isAuthorizedSender(e.sender)) return { success: false, error: 'Unauthorized IPC access.' };
+  const winEntry = getWindowEntry(e.sender);
+  if (!winEntry) return { success: false, error: 'Window not found' };
+  const targetId = tabId || winEntry.activeTabId;
+  const tab = winEntry.tabs.find(t => t.id === targetId);
+  if (!tab) return { success: false, error: 'Tab not found' };
+
+  try {
+    const success = await executeWithAttachedView(winEntry, tab, async () => {
+      return await cdpType(tab.view.webContents, text);
+    });
+    return { success };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ai-cdp-press-key', async (e, { tabId, key }) => {
+  if (!isAuthorizedSender(e.sender)) return { success: false, error: 'Unauthorized IPC access.' };
+  const winEntry = getWindowEntry(e.sender);
+  if (!winEntry) return { success: false, error: 'Window not found' };
+  const targetId = tabId || winEntry.activeTabId;
+  const tab = winEntry.tabs.find(t => t.id === targetId);
+  if (!tab) return { success: false, error: 'Tab not found' };
+
+  try {
+    const success = await executeWithAttachedView(winEntry, tab, async () => {
+      return await cdpPressKey(tab.view.webContents, key);
+    });
+    return { success };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ai-is-tab-loading', (e, tabId) => {
+  const winEntry = getWindowEntry(e.sender);
+  if (!winEntry) return false;
+  const id = tabId || winEntry.activeTabId;
+  const tab = winEntry.tabs.find(t => t.id === id);
+  return tab ? tab.loading || tab.view.webContents.isLoading() : false;
+});
+
+ipcMain.handle('ai-set-worker-tab', (e, tabId) => {
+  const winEntry = getWindowEntry(e.sender);
+  if (winEntry) {
+    winEntry.workerTabId = tabId;
+    if (tabId) {
+      const workerTab = winEntry.tabs.find(t => t.id === tabId);
+      if (workerTab) {
+        try { winEntry.win.addBrowserView(workerTab.view); } catch (e) {}
+      }
+    }
+    updateActiveViewBounds(winEntry.win.id);
+  }
+});
+
 ipcMain.handle('ai-save-file', async (e, { filename, content }) => {
+  if (!isAuthorizedSender(e.sender)) return { success: false, error: 'Unauthorized IPC access.' };
   try {
     const downloadsPath = app.getPath('downloads');
     const safeFilename = filename.replace(/[^a-zA-Z0-9_.-]/g, '_');
     const filePath = path.join(downloadsPath, safeFilename);
+
+    // Security check: Path traversal prevention
+    if (!filePath.startsWith(downloadsPath)) {
+      return { success: false, error: 'Path traversal detected.' };
+    }
+
+    // Security check: Block executable/script files
+    const ext = path.extname(safeFilename).toLowerCase();
+    const blockedExtensions = ['.exe', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.vbe', '.jse', '.wsf', '.wsh', '.msc', '.lnk', '.sh', '.msi', '.com', '.scr', '.hta', '.cpl', '.pif', '.jar', '.sys', '.reg', '.inf'];
+    if (blockedExtensions.includes(ext)) {
+      return { success: false, error: 'File type blocked for security reasons.' };
+    }
+
     fs.writeFileSync(filePath, content, 'utf8');
     return { success: true, filePath };
   } catch (err) {
     return { success: false, error: err.message };
   }
 });
+
+// ── Helper function to download tools securely ──
+function downloadToolToFile(toolId, filename, token, resolve) {
+  try {
+    const urlStr = `${AI_BASE}/v1/tools/${toolId}/download`;
+    const url = new URL(urlStr);
+    const downloadsPath = app.getPath('downloads');
+    const safeFilename = filename.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    const filePath = path.join(downloadsPath, safeFilename);
+
+    if (!filePath.startsWith(downloadsPath)) {
+      resolve({ success: false, error: 'Path traversal detected.' });
+      return;
+    }
+
+    // Security check: Block executable/script files
+    const ext = path.extname(safeFilename).toLowerCase();
+    const blockedExtensions = ['.exe', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.vbe', '.jse', '.wsf', '.wsh', '.msc', '.lnk', '.sh', '.msi', '.com', '.scr', '.hta', '.cpl', '.pif', '.jar', '.sys', '.reg', '.inf'];
+    if (blockedExtensions.includes(ext)) {
+      resolve({ success: false, error: 'File type blocked for security reasons.' });
+      return;
+    }
+
+    const lib = url.protocol === 'https:' ? https : http;
+    const headers = {
+      'Authorization': 'Bearer ' + token
+    };
+
+    const req = lib.get({
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname,
+      headers
+    }, (res) => {
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        const redirectUrl = res.headers.location;
+        downloadUrlToFile(redirectUrl, resolve);
+        return;
+      }
+      if (res.statusCode !== 200) {
+        resolve({ success: false, error: `HTTP status ${res.statusCode}` });
+        return;
+      }
+
+      const file = fs.createWriteStream(filePath);
+      res.pipe(file);
+      file.on('finish', () => {
+        file.close();
+        resolve({ success: true, filePath, filename: safeFilename });
+      });
+      file.on('error', (err) => {
+        resolve({ success: false, error: err.message });
+      });
+    });
+
+    req.on('error', (err) => {
+      resolve({ success: false, error: err.message });
+    });
+  } catch (err) {
+    resolve({ success: false, error: err.message });
+  }
+}
+
+// ── Helper function to submit tickets with multipart ──
+function submitTicket({ subject, description, priority, screenshotBase64 }, token) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(AI_BASE + '/v1/tickets');
+    const lib = url.protocol === 'https:' ? https : http;
+    const boundary = '----DevilBrowserBoundary' + Math.random().toString(36).substr(2, 9);
+    
+    const parts = [];
+
+    // Subject
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="subject"\r\n\r\n${subject}\r\n`));
+
+    // Description
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="description"\r\n\r\n${description}\r\n`));
+
+    // Priority
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="priority"\r\n\r\n${priority || 'medium'}\r\n`));
+
+    // Screenshot (optional)
+    if (screenshotBase64) {
+      const imgBuffer = Buffer.from(screenshotBase64, 'base64');
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="screenshot"; filename="screenshot.png"\r\nContent-Type: image/png\r\n\r\n`));
+      parts.push(imgBuffer);
+      parts.push(Buffer.from('\r\n'));
+    }
+
+    parts.push(Buffer.from(`--${boundary}--\r\n`));
+
+    const bodyBuffer = Buffer.concat(parts);
+
+    const headers = {
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      'Content-Length': bodyBuffer.length
+    };
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+
+    const req = lib.request({
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname,
+      method: 'POST',
+      headers,
+      timeout: 30000
+    }, (res) => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => {
+        const data = Buffer.concat(chunks).toString('utf8');
+        try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+        catch { resolve({ status: res.statusCode, body: data }); }
+      });
+    });
+
+    req.on('error', reject);
+    req.write(bodyBuffer);
+    req.end();
+  });
+}
 
 function downloadUrlToFile(urlStr, resolve) {
   try {
@@ -1580,7 +2187,23 @@ function downloadUrlToFile(urlStr, resolve) {
       filename += '.pdf';
     }
     const downloadsPath = app.getPath('downloads');
-    const filePath = path.join(downloadsPath, filename);
+    
+    // Sanitize filename to prevent directory traversal
+    const safeFilename = filename.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    const filePath = path.join(downloadsPath, safeFilename);
+
+    if (!filePath.startsWith(downloadsPath)) {
+      resolve({ success: false, error: 'Path traversal detected.' });
+      return;
+    }
+
+    // Security check: Block executable/script files
+    const ext = path.extname(safeFilename).toLowerCase();
+    const blockedExtensions = ['.exe', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.vbe', '.jse', '.wsf', '.wsh', '.msc', '.lnk', '.sh', '.msi', '.com', '.scr', '.hta', '.cpl', '.pif', '.jar', '.sys', '.reg', '.inf'];
+    if (blockedExtensions.includes(ext)) {
+      resolve({ success: false, error: 'File type blocked for security reasons.' });
+      return;
+    }
 
     const lib = url.protocol === 'https:' ? https : http;
     const file = fs.createWriteStream(filePath);
@@ -1601,7 +2224,7 @@ function downloadUrlToFile(urlStr, resolve) {
       res.pipe(file);
       file.on('finish', () => {
         file.close();
-        resolve({ success: true, filePath, filename });
+        resolve({ success: true, filePath, filename: safeFilename });
       });
       file.on('error', (err) => {
         resolve({ success: false, error: err.message });
@@ -1616,6 +2239,7 @@ function downloadUrlToFile(urlStr, resolve) {
 }
 
 ipcMain.handle('ai-download-file', async (e, urlStr) => {
+  if (!isAuthorizedSender(e.sender)) return { success: false, error: 'Unauthorized IPC access.' };
   return new Promise((resolve) => {
     downloadUrlToFile(urlStr, resolve);
   });
@@ -1692,7 +2316,8 @@ ipcMain.handle('ai-analyse-document', async (e, { filePath, mimeType, name }) =>
 });
 
 // ── Tools Marketplace ──
-ipcMain.handle('ai-get-tools', async () => {
+ipcMain.handle('ai-get-tools', async (e) => {
+  if (!isAuthorizedSender(e.sender)) return { success: false, error: 'Unauthorized IPC access.' };
   const token = store.get('ai-token');
   if (!token) return { items: [] };
   try {
@@ -1702,40 +2327,19 @@ ipcMain.handle('ai-get-tools', async () => {
 });
 
 ipcMain.handle('ai-download-tool', async (e, { id, filename, type }) => {
+  if (!isAuthorizedSender(e.sender)) return { success: false, error: 'Unauthorized IPC access.' };
   const token = store.get('ai-token');
   if (!token) return { error: 'Not authenticated' };
-  const downloadPath = path.join(app.getPath('downloads'), filename);
 
   return new Promise((resolve) => {
-    const url = new URL(AI_BASE + `/v1/tools/${id}/download`);
-    const lib = url.protocol === 'https:' ? https : http;
-    const req = lib.request({
-      hostname: url.hostname,
-      port: url.port || (url.protocol === 'https:' ? 443 : 80),
-      path: url.pathname,
-      method: 'GET',
-      headers: { 'Authorization': 'Bearer ' + token }
-    }, (res) => {
-      if (res.statusCode === 302) {
-        // External redirect — open in browser tab
-        const winEntry = Array.from(windows.values())[0];
-        if (winEntry) createTab(winEntry.win.id, res.headers.location);
-        resolve({ success: true, type: 'external' });
-        return;
-      }
-      const file = fs.createWriteStream(downloadPath);
-      res.pipe(file);
-      file.on('finish', () => { file.close(); resolve({ success: true, path: downloadPath }); });
-      file.on('error', err => resolve({ error: err.message }));
-    });
-    req.on('error', err => resolve({ error: err.message }));
-    req.end();
+    downloadToolToFile(id, filename, token, resolve);
   });
 });
 
 // ── Semantic Search ──
 // Stores page embeddings in electron-store, cosine-similarity search
 ipcMain.handle('ai-index-page', async (e, { url, title, text }) => {
+  if (!isAuthorizedSender(e.sender)) return { success: false, error: 'Unauthorized IPC access.' };
   const token = store.get('ai-token');
   if (!token || !text || text.length < 100) return;
   try {
@@ -1758,6 +2362,7 @@ ipcMain.handle('ai-index-page', async (e, { url, title, text }) => {
 });
 
 ipcMain.handle('ai-semantic-search', async (e, query) => {
+  if (!isAuthorizedSender(e.sender)) return [];
   const token = store.get('ai-token');
   if (!token || !query) return [];
   try {
@@ -1797,6 +2402,8 @@ ipcMain.on('ai-tab-context-action', (e, data) => {
 
 // ── Page indexing from tab (semantic search) ──
 ipcMain.on('ai-index-page-from-tab', async (e, { url, title, text }) => {
+  const tabInfo = getTabByWebContents(e.sender);
+  if (!tabInfo) return; // unauthorized or not a browser tab
   const token = store.get('ai-token');
   if (!token || !text || text.length < 100 || !url || url.startsWith('about:')) return;
   try {
@@ -1817,26 +2424,36 @@ ipcMain.on('ai-index-page-from-tab', async (e, { url, title, text }) => {
   } catch {}
 });
 
-ipcMain.handle('ai-get-page-screenshot', async (e) => {
-  let activeTab = null;
+ipcMain.handle('ai-get-page-screenshot', async (e, tabId) => {
+  if (!isAuthorizedSender(e.sender)) return { error: 'Unauthorized IPC access.' };
+  let targetTab = null;
+  let targetWinEntry = null;
   for (const entry of windows.values()) {
-    activeTab = entry.tabs.find(t => t.id === entry.activeTabId);
-    if (activeTab) break;
+    const id = tabId || entry.activeTabId;
+    targetTab = entry.tabs.find(t => t.id === id);
+    if (targetTab) {
+      targetWinEntry = entry;
+      break;
+    }
   }
 
-  if (!activeTab || !activeTab.view) {
-    return { error: 'No active tab view found' };
+  if (!targetTab || !targetTab.view) {
+    return { error: 'No tab view found' };
   }
 
   try {
-    const image = await activeTab.view.webContents.capturePage();
-    return { base64: image.toPNG().toString('base64'), mimeType: 'image/png' };
+    const result = await executeWithAttachedView(targetWinEntry, targetTab, async () => {
+      const image = await targetTab.view.webContents.capturePage();
+      return { base64Data: image.toPNG().toString('base64'), success: true };
+    });
+    return result;
   } catch (err) {
     return { error: err.message };
   }
 });
 
 ipcMain.handle('ai-batch-generate', async (e, { prompts, systemInstruction }) => {
+  if (!isAuthorizedSender(e.sender)) return { error: 'Unauthorized IPC access.' };
   const token = store.get('ai-token');
   if (!token) return { error: 'Not authenticated' };
 
@@ -1871,6 +2488,31 @@ ipcMain.handle('ai-batch-generate', async (e, { prompts, systemInstruction }) =>
     return { error: 'Batch request timed out' };
   } catch (err) {
     return { error: err.message };
+  }
+});
+
+ipcMain.handle('ai-submit-ticket', async (e, payload) => {
+  if (!isAuthorizedSender(e.sender)) return { success: false, error: 'Unauthorized IPC access.' };
+  const token = store.get('ai-token');
+  if (!token) return { success: false, error: 'Not authenticated' };
+
+  try {
+    const res = await submitTicket(payload, token);
+    return res.body;
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ai-get-tickets', async (e) => {
+  if (!isAuthorizedSender(e.sender)) return { success: false, error: 'Unauthorized IPC access.' };
+  const token = store.get('ai-token');
+  if (!token) return { success: false, error: 'Not authenticated' };
+  try {
+    const res = await aiFetch('GET', '/v1/tickets', null, token);
+    return res.body;
+  } catch (err) {
+    return { success: false, error: err.message };
   }
 });
 
@@ -2034,41 +2676,50 @@ app.whenReady().then(() => {
     }
   });
 
-  // Handle downloads
-  session.defaultSession.on('will-download', (event, item, webContents) => {
-    const id = Date.now().toString() + Math.random().toString(36).substr(2, 5);
-    const fileName = item.getFilename();
-    const total = item.getTotalBytes();
-    const savePath = path.join(app.getPath('downloads'), fileName);
-    item.setSavePath(savePath);
-
-    activeDownloads.set(id, item);
-
-    const win = BrowserWindow.fromWebContents(webContents);
-    if (win) {
-      win.webContents.send('download-started', { id, fileName, total, savePath });
-    }
-
-    item.on('updated', (evt, state) => {
-      const received = item.getReceivedBytes();
-      if (win) {
-        win.webContents.send('download-updated', {
-          id,
-          fileName,
-          received,
-          total,
-          state: state === 'interrupted' ? 'paused' : state
-        });
-      }
-    });
-
-    item.once('done', (evt, state) => {
-      activeDownloads.delete(id);
-      if (win) {
-        win.webContents.send('download-completed', { id, fileName, savePath, state });
-      }
-    });
+  // Handle downloads across normal and incognito sessions
+  app.on('session-created', (ses) => {
+    registerDownloadHandler(ses);
   });
+  registerDownloadHandler(session.defaultSession);
+
+  function registerDownloadHandler(ses) {
+    ses.on('will-download', (event, item, webContents) => {
+      const id = Date.now().toString() + Math.random().toString(36).substr(2, 5);
+      const fileName = item.getFilename();
+      const total = item.getTotalBytes();
+      
+      const downloadDir = store.get('downloadDirectory') || app.getPath('downloads');
+      const savePath = getUniqueSavePath(downloadDir, fileName);
+      item.setSavePath(savePath);
+
+      activeDownloads.set(id, item);
+
+      const win = BrowserWindow.fromWebContents(webContents);
+      if (win) {
+        win.webContents.send('download-started', { id, fileName, total, savePath });
+      }
+
+      item.on('updated', (evt, state) => {
+        const received = item.getReceivedBytes();
+        if (win) {
+          win.webContents.send('download-updated', {
+            id,
+            fileName,
+            received,
+            total,
+            state: state === 'interrupted' ? 'paused' : state
+          });
+        }
+      });
+
+      item.once('done', (evt, state) => {
+        activeDownloads.delete(id);
+        if (win) {
+          win.webContents.send('download-completed', { id, fileName, savePath, state });
+        }
+      });
+    });
+  }
 
   // Build minimal native application menu
   const template = [
@@ -2098,6 +2749,93 @@ app.whenReady().then(() => {
   initialWin.webContents.once('did-finish-load', () => {
     createTab(initialWin.id, 'about:blank');
   });
+});
+
+// --- SECURE CREDENTIALS STORAGE API ---
+const credentialStore = new Store({ name: 'secure-credentials' });
+
+ipcMain.handle('save-credential', async (e, { domain, username, password }) => {
+  if (!isAuthorizedSender(e.sender)) return { success: false, error: 'Unauthorized IPC access.' };
+  try {
+    if (!domain || !username || !password) {
+      return { success: false, error: 'Missing required parameters: domain, username, or password' };
+    }
+
+    const key = `${domain.toLowerCase()}:${username}`;
+    let storedPassword = password;
+
+    if (safeStorage.isEncryptionAvailable()) {
+      const encrypted = safeStorage.encryptString(password);
+      storedPassword = encrypted.toString('hex');
+    } else {
+      console.warn('Encryption is not available on this host. Saving in plain text (fallback).');
+    }
+
+    const credentials = credentialStore.get('credentials', {});
+    credentials[key] = {
+      domain: domain.toLowerCase(),
+      username,
+      password: storedPassword,
+      encrypted: safeStorage.isEncryptionAvailable()
+    };
+    credentialStore.set('credentials', credentials);
+    return { success: true, key };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('list-credentials', async (e) => {
+  if (!isAuthorizedSender(e.sender)) return { success: false, error: 'Unauthorized IPC access.' };
+  try {
+    const credentials = credentialStore.get('credentials', {});
+    const list = Object.entries(credentials).map(([key, data]) => ({
+      key,
+      domain: data.domain,
+      username: data.username
+    }));
+    return { success: true, list };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('get-credential', async (e, key) => {
+  if (!isAuthorizedSender(e.sender)) return { success: false, error: 'Unauthorized IPC access.' };
+  try {
+    const credentials = credentialStore.get('credentials', {});
+    const data = credentials[key];
+    if (!data) return { success: false, error: 'Credential not found' };
+
+    let decryptedPassword = data.password;
+    if (data.encrypted && safeStorage.isEncryptionAvailable()) {
+      const buf = Buffer.from(data.password, 'hex');
+      decryptedPassword = safeStorage.decryptString(buf);
+    }
+    return {
+      success: true,
+      credential: {
+        domain: data.domain,
+        username: data.username,
+        password: decryptedPassword
+      }
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('delete-credential', async (e, key) => {
+  if (!isAuthorizedSender(e.sender)) return { success: false, error: 'Unauthorized IPC access.' };
+  try {
+    const credentials = credentialStore.get('credentials', {});
+    if (!credentials[key]) return { success: false, error: 'Credential not found' };
+    delete credentials[key];
+    credentialStore.set('credentials', credentials);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
 });
 
 app.on('will-quit', () => {
