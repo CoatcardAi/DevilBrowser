@@ -36,16 +36,23 @@ function downloadUrlToFile(urlStr, resolve) {
     const file = fs.createWriteStream(filePath);
     const req = lib.get(urlStr, (res) => {
       if (res.statusCode === 301 || res.statusCode === 302) {
-        const redirectUrl = res.headers.location;
+        let redirectUrl = res.headers.location;
+        try {
+          redirectUrl = new URL(redirectUrl, urlStr).toString();
+        } catch (e) {}
+        file.on('close', () => {
+          try { fs.unlinkSync(filePath); } catch(e){}
+          downloadUrlToFile(redirectUrl, resolve);
+        });
         file.close();
-        try { fs.unlinkSync(filePath); } catch(e){}
-        downloadUrlToFile(redirectUrl, resolve);
         return;
       }
       if (res.statusCode !== 200) {
+        file.on('close', () => {
+          try { fs.unlinkSync(filePath); } catch(e){}
+          resolve({ success: false, error: `HTTP status ${res.statusCode}` });
+        });
         file.close();
-        try { fs.unlinkSync(filePath); } catch(e){}
-        resolve({ success: false, error: `HTTP status ${res.statusCode}` });
         return;
       }
       res.pipe(file);
@@ -97,7 +104,10 @@ function downloadToolToFile(toolId, filename, token, resolve) {
       headers
     }, (res) => {
       if (res.statusCode === 301 || res.statusCode === 302) {
-        const redirectUrl = res.headers.location;
+        let redirectUrl = res.headers.location;
+        try {
+          redirectUrl = new URL(redirectUrl, urlStr).toString();
+        } catch (e) {}
         downloadUrlToFile(redirectUrl, resolve);
         return;
       }
@@ -144,7 +154,8 @@ function submitTicket({ subject, description, priority, screenshotBase64 }, toke
 
     // Screenshot (optional)
     if (screenshotBase64) {
-      const imgBuffer = Buffer.from(screenshotBase64, 'base64');
+      const cleanBase64 = screenshotBase64.replace(/^data:image\/\w+;base64,/, '');
+      const imgBuffer = Buffer.from(cleanBase64, 'base64');
       parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="screenshot"; filename="screenshot.png"\r\nContent-Type: image/png\r\n\r\n`));
       parts.push(imgBuffer);
       parts.push(Buffer.from('\r\n'));

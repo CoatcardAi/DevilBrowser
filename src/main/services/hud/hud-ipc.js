@@ -81,6 +81,33 @@ function init() {
       }
     }
   });
+
+  ipcMain.on('hud-pause-clicked', (e) => {
+    for (const entry of state.windows.values()) {
+      if (entry.hudWindow && entry.hudWindow.webContents === e.sender) {
+        entry.win.webContents.send('hud-pause-triggered');
+        break;
+      }
+    }
+  });
+
+  ipcMain.on('hud-resume-clicked', (e) => {
+    for (const entry of state.windows.values()) {
+      if (entry.hudWindow && entry.hudWindow.webContents === e.sender) {
+        entry.win.webContents.send('hud-resume-triggered');
+        break;
+      }
+    }
+  });
+
+  ipcMain.on('hud-response', (e, response) => {
+    for (const entry of state.windows.values()) {
+      if (entry.hudWindow && entry.hudWindow.webContents === e.sender) {
+        entry.win.webContents.send('hud-user-response', response);
+        break;
+      }
+    }
+  });
 }
 
 module.exports = {

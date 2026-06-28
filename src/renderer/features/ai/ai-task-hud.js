@@ -58,6 +58,22 @@
       setTimeout(() => HUD.hide(), 5000);
     },
 
+    // Request input/choice interaction from the user
+    requestInput(prompt, options) {
+      window.electronAPI.hudStateUpdate({
+        type: 'request-input',
+        prompt,
+        options
+      });
+    },
+
+    // Clear input/choice block
+    clearRequestInput() {
+      window.electronAPI.hudStateUpdate({
+        type: 'clear-request-input'
+      });
+    },
+
     // Hide HUD window
     hide() {
       window.electronAPI.hudStateUpdate({

@@ -27,7 +27,17 @@ function registerDownloadHandler(ses) {
 
     state.activeDownloads.set(id, item);
 
-    const win = BrowserWindow.fromWebContents(webContents);
+    let win = BrowserWindow.fromWebContents(webContents);
+    if (!win) {
+      for (const entry of state.windows.values()) {
+        const tab = entry.tabs.find(t => t.view.webContents === webContents);
+        if (tab) {
+          win = entry.win;
+          break;
+        }
+      }
+    }
+
     if (win) {
       win.webContents.send('download-started', { id, fileName, total, savePath });
     }

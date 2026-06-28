@@ -22,7 +22,7 @@ async function cdpClick(webContents, x, y) {
   const dbg = webContents.debugger;
   const isAttached = dbg.isAttached();
   if (!isAttached) {
-    dbg.attach();
+    await dbg.attach();
   }
   try {
     // Humanized Bezier pathing to coordinate
@@ -51,24 +51,10 @@ async function cdpType(webContents, text) {
   const dbg = webContents.debugger;
   const isAttached = dbg.isAttached();
   if (!isAttached) {
-    dbg.attach();
+    await dbg.attach();
   }
   try {
-    // Typist Jitter Simulator (50ms - 150ms delays with keydown/keyup events)
-    for (const char of text) {
-      await dbg.sendCommand('Input.dispatchKeyEvent', {
-        type: 'keyDown',
-        text: char,
-        unmodifiedText: char,
-        key: char
-      });
-      await dbg.sendCommand('Input.insertText', { text: char });
-      await dbg.sendCommand('Input.dispatchKeyEvent', {
-        type: 'keyUp',
-        key: char
-      });
-      await new Promise(r => setTimeout(r, 45 + Math.random() * 85));
-    }
+    await dbg.sendCommand('Input.insertText', { text: text });
     return true;
   } catch (err) {
     console.error('CDP type failed:', err);
@@ -84,7 +70,7 @@ async function cdpPressKey(webContents, key) {
   const dbg = webContents.debugger;
   const isAttached = dbg.isAttached();
   if (!isAttached) {
-    dbg.attach();
+    await dbg.attach();
   }
   try {
     let windowsVirtualKeyCode = 0;

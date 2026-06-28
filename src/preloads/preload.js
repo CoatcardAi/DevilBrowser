@@ -17,10 +17,14 @@ const SAFE_CHANNELS = [
   'shortcut-toggle-routing',
   'shortcut-cycle-source',
   'shortcut-toggle-mix',
+  'shortcut-toggle-protection',
   'tab-audio-settings-changed',
   'adblocker-state-changed',
   'always-ontop-state-changed',
-  'stats-updated'
+  'stats-updated',
+  'tab-metadata-updated',
+  'tab-crashed',
+  'find-results-updated'
 ];
 
 const AI_SAFE_CHANNELS = [
@@ -35,6 +39,9 @@ const AI_SAFE_CHANNELS = [
   'ai-stream-error',
   'hud-data',
   'hud-cancel-triggered',
+  'hud-pause-triggered',
+  'hud-resume-triggered',
+  'hud-user-response',
   'open-command-palette'
 ];
 
@@ -102,6 +109,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   aiGetPageDOM:     (tabId) => ipcRenderer.invoke('ai-get-page-dom', tabId),
   aiExecutePageAction: (script, tabId) => ipcRenderer.invoke('ai-execute-page-action', { script, tabId }),
   aiGetPageScreenshot: (tabId) => ipcRenderer.invoke('ai-get-page-screenshot', tabId),
+  aiFetchImageBase64: (url) => ipcRenderer.invoke('ai-fetch-image-base64', url),
   aiAnalyseDocument: (filePath, mimeType, name) => ipcRenderer.invoke('ai-analyse-document', { filePath, mimeType, name }),
   saveImage: (payload) => ipcRenderer.invoke('save-image', payload),
   aiSaveFile: (filename, content) => ipcRenderer.invoke('ai-save-file', { filename, content }),
@@ -126,10 +134,36 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── AI Embeddings / Semantic Search ──
   aiSemanticSearch: (query) => ipcRenderer.invoke('ai-semantic-search', query),
   aiIndexPage:      (url, title, text) => ipcRenderer.invoke('ai-index-page', { url, title, text }),
+  aiGetIndexedCount: () => ipcRenderer.invoke('ai-get-indexed-count'),
+  aiClearIndexedPages: () => ipcRenderer.invoke('ai-clear-indexed-pages'),
 
   // ── standalone HUD window actions ──
   hudStateUpdate: (data) => ipcRenderer.send('hud-state-update', data),
   hudCancelClicked: () => ipcRenderer.send('hud-cancel-clicked'),
+  hudPauseClicked: () => ipcRenderer.send('hud-pause-clicked'),
+  hudResumeClicked: () => ipcRenderer.send('hud-resume-clicked'),
+  sendHudResponse: (response) => ipcRenderer.send('hud-response', response),
+
+  // ── Chrome-like Missing Features APIs ──
+  duplicateTab: (tabId) => ipcRenderer.invoke('duplicate-tab', tabId),
+  findInPage: (tabId, text, options) => ipcRenderer.invoke('find-in-page', { tabId, text, options }),
+  stopFindInPage: (tabId, action) => ipcRenderer.invoke('stop-find-in-page', { tabId, action }),
+  togglePinTab: (tabId) => ipcRenderer.invoke('toggle-pin-tab', tabId),
+  discardTab: (tabId) => ipcRenderer.invoke('discard-tab', tabId),
+  getSearchSuggestions: (query) => ipcRenderer.invoke('get-search-suggestions', query),
+  getCertificateInfo: (url) => ipcRenderer.invoke('get-certificate-info', url),
+  getAppMetrics: () => ipcRenderer.invoke('get-app-metrics'),
+  fetchPageSource: (url) => ipcRenderer.invoke('fetch-page-source', url),
+  getZoomLevel: (tabId) => ipcRenderer.invoke('get-zoom-level', tabId),
+  setZoomLevel: (tabId, zoomLevel) => ipcRenderer.invoke('set-zoom-level', { tabId, zoomLevel }),
+  getSiteSettings: (domain) => ipcRenderer.invoke('get-site-settings', domain),
+  saveSiteSettings: (domain, settings) => ipcRenderer.invoke('save-site-settings', { domain, settings }),
+  restartBrowser: () => ipcRenderer.invoke('restart-browser'),
+  printPage: (tabId) => ipcRenderer.invoke('print-page', tabId),
+  savePage: (tabId) => ipcRenderer.invoke('save-page', tabId),
+  isIncognito: () => ipcRenderer.invoke('is-incognito'),
+  createPrivateWindow: () => ipcRenderer.invoke('create-private-window'),
+  setViewsVisibility: (visible) => ipcRenderer.invoke('set-views-visibility', visible),
 
   // ── Streaming event helpers ──
   onAiStream: (onChunk, onDone, onError) => {

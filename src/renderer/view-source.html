@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Source of Page</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=Montserrat:wght@600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #090d16;
+      --card-bg: #0f172a;
+      --accent: #8b5cf6;
+      --text: #e2e8f0;
+      --text-muted: #64748b;
+      --border: rgba(139, 92, 246, 0.2);
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Fira Code', monospace;
+      margin: 0;
+      padding: 0;
+      font-size: 13px;
+    }
+    header {
+      background: var(--card-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 20px;
+      font-family: 'Montserrat', sans-serif;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--accent);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .url-display {
+      color: var(--text);
+      font-family: 'Fira Code', monospace;
+      font-size: 12px;
+      background: rgba(0,0,0,0.3);
+      padding: 4px 10px;
+      border-radius: 4px;
+      border: 1px solid rgba(255,255,255,0.05);
+    }
+    pre {
+      margin: 0;
+      padding: 20px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      line-height: 1.5;
+    }
+    .line-number {
+      color: var(--text-muted);
+      display: inline-block;
+      width: 45px;
+      text-align: right;
+      margin-right: 15px;
+      user-select: none;
+      border-right: 1px solid var(--border);
+      padding-right: 10px;
+    }
+    .code-line {
+      display: flex;
+    }
+    .code-content {
+      flex: 1;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <span>DevilBrowser: View Page Source</span>
+    <span class="url-display" id="url-label">Loading source...</span>
+  </header>
+  <pre id="code-container">Loading page source code...</pre>
+
+  <script>
+    const urlParams = new URLSearchParams(window.location.search);
+    const targetUrl = urlParams.get('url');
+    const label = document.getElementById('url-label');
+    const container = document.getElementById('code-container');
+
+    if (targetUrl) {
+      label.textContent = targetUrl;
+      window.electronAPI.fetchPageSource(targetUrl).then(html => {
+        container.textContent = '';
+        const lines = html.split('\n');
+        lines.forEach((line, index) => {
+          const lineDiv = document.createElement('div');
+          lineDiv.className = 'code-line';
+
+          const numSpan = document.createElement('span');
+          numSpan.className = 'line-number';
+          numSpan.textContent = index + 1;
+
+          const contentSpan = document.createElement('span');
+          contentSpan.className = 'code-content';
+          contentSpan.textContent = line;
+
+          lineDiv.appendChild(numSpan);
+          lineDiv.appendChild(contentSpan);
+          container.appendChild(lineDiv);
+        });
+      }).catch(err => {
+        container.textContent = 'Failed to load page source: ' + String(err);
+      });
+    } else {
+      container.textContent = 'No target URL provided.';
+    }
+  </script>
+</body>
+</html>

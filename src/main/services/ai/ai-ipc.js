@@ -455,10 +455,38 @@ function init() {
     const token = state.store.get('ai-token');
     if (!token) return { error: 'Not authenticated' };
     try {
+      const ext = path.extname(filePath).toLowerCase().replace('.', '');
+      if (ext === 'docx') {
+        let extractedText = "";
+        try {
+          const mammoth = require('mammoth');
+          const result = await mammoth.extractRawText({ path: filePath });
+          extractedText = result.value;
+        } catch (e) {
+          extractedText = `(Failed to parse DOCX locally: ${e.message})`;
+        }
+        
+        const res = await aiFetch('POST', '/v1/generate', {
+          prompt: `Please analyse this document text from "${name}" and provide a comprehensive summary. Highlight key points, data, and conclusions:\n\n${extractedText}`
+        }, token);
+        return res.body;
+      }
+
+      let resolvedMimeType = mimeType;
+      const mimeTypesMap = {
+        'pdf': 'application/pdf',
+        'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'xls': 'application/vnd.ms-excel',
+        'csv': 'text/csv'
+      };
+      if (mimeTypesMap[ext]) {
+        resolvedMimeType = mimeTypesMap[ext];
+      }
+
       const data = fs.readFileSync(filePath).toString('base64');
       const res = await aiFetch('POST', '/v1/generate', {
         prompt: `Please analyse this document called "${name}" and provide a comprehensive summary. Highlight key points, data, and conclusions.`,
-        files: [{ mimeType, data, name }]
+        files: [{ mimeType: resolvedMimeType, data, name }]
       }, token);
       return res.body;
     } catch(err) { return { error: err.message }; }
@@ -494,6 +522,18 @@ function init() {
   ipcMain.handle('ai-semantic-search', (e, query) => {
     if (!isAuthorizedSender(e.sender)) return [];
     return aiHistory.semanticSearch(query);
+  });
+
+  ipcMain.handle('ai-get-indexed-count', (e) => {
+    if (!isAuthorizedSender(e.sender)) return 0;
+    const cache = state.store.get('ai-page-embeddings', {});
+    return Object.keys(cache).length;
+  });
+
+  ipcMain.handle('ai-clear-indexed-pages', (e) => {
+    if (!isAuthorizedSender(e.sender)) return { success: false };
+    state.store.set('ai-page-embeddings', {});
+    return { success: true };
   });
 
   // AI Credentials Vault
@@ -582,14 +622,14 @@ function init() {
     if (!token) return { error: 'Not authenticated' };
 
     try {
-      const requests = prompts.map(p => ({ prompt: p }));
-      const submitRes = await aiFetch('POST', '/v1/generate/batch', { requests, systemInstruction }, token);
+      // Strictly matches POST /v1/generate/batch shape
+      const submitRes = await aiFetch('POST', '/v1/generate/batch', { prompts }, token);
       
-      if (!submitRes.body || !submitRes.body.batchId) {
+      const batchId = submitRes.body ? submitRes.body.batch_id : null;
+      if (!batchId) {
         return { error: 'Failed to submit batch: ' + JSON.stringify(submitRes.body) };
       }
 
-      const batchId = submitRes.body.batchId;
       console.log(`[Batch AI] Submitted batch ${batchId}. Polling queue...`);
 
       const maxPolls = 60; // 2 minutes max
@@ -599,14 +639,24 @@ function init() {
         
         if (!pollRes.body) continue;
         
-        const status = pollRes.body.status;
-        if (status === 'completed') {
-          return { success: true, results: pollRes.body.results };
-        } else if (status === 'failed') {
-          return { error: 'Batch execution failed on server' };
+        const completed = pollRes.body.completed || 0;
+        const failed = pollRes.body.failed || 0;
+        const total = pollRes.body.total || 0;
+        const pending = pollRes.body.pending !== undefined ? pollRes.body.pending : (total - (completed + failed));
+
+        if (pending === 0) {
+          const jobs = pollRes.body.jobs || [];
+          const sortedJobs = jobs.sort((a, b) => a.prompt_index - b.prompt_index);
+          const results = sortedJobs.map(job => {
+            if (job.state === 'completed' && job.result) {
+              return { text: job.result.text };
+            }
+            return { error: job.error || 'Job failed' };
+          });
+          return { success: true, results };
         }
         
-        console.log(`[Batch AI] Batch ${batchId} status: ${status} (${pollRes.body.completed_requests}/${pollRes.body.total_requests})`);
+        console.log(`[Batch AI] Batch ${batchId} status: (${completed + failed}/${total} completed, pending: ${pending})`);
       }
 
       return { error: 'Batch request timed out' };

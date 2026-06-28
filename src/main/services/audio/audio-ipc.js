@@ -85,9 +85,14 @@ function init() {
   });
 
   ipcMain.handle('get-desktop-audio-source-id', async () => {
-    const sources = await desktopCapturer.getSources({ types: ['screen'] });
-    const primary = sources[0];
-    return primary ? primary.id : null;
+    try {
+      const sources = await desktopCapturer.getSources({ types: ['screen'] });
+      const primary = sources[0];
+      return primary ? primary.id : null;
+    } catch (err) {
+      console.error('Failed to get desktop audio source id:', err);
+      return null;
+    }
   });
 
   ipcMain.handle('list-audio-devices', async () => {

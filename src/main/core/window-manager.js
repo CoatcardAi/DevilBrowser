@@ -131,7 +131,8 @@ function createMainWindow(isIncognito = false) {
     closedTabsHistory: [],
     toolbarHeight: 110,
     rightMargin: 0,
-    hudWindow: null
+    hudWindow: null,
+    isIncognito
   });
 
   // Apply saved content protection preference on startup (default true)
@@ -156,7 +157,9 @@ function createMainWindow(isIncognito = false) {
 
   win.on('close', (event) => {
     if (!app.isQuitting) {
-      if (state.browserMode === 'tray') {
+      const entry = state.windows.get(winId);
+      const isIncognitoWin = entry && entry.isIncognito;
+      if (state.browserMode === 'tray' && !isIncognitoWin) {
         event.preventDefault();
         win.minimize();
         win.hide();
@@ -415,6 +418,10 @@ function handleShortcutAction(winEntry, accelerator) {
   }
   if (normAcc === 'alt+m') {
     winEntry.win.webContents.send('shortcut-toggle-mix');
+    return true;
+  }
+  if (normAcc === 'alt+p') {
+    winEntry.win.webContents.send('shortcut-toggle-protection');
     return true;
   }
 

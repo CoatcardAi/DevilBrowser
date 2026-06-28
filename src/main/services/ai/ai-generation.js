@@ -7,6 +7,13 @@ const state = require('../../core/state');
 const { aiFetch, AI_BASE } = require('./ai-fetch');
 const downloadService = require('../downloads/download-service');
 
+let mammoth;
+try {
+  mammoth = require('mammoth');
+} catch (e) {
+  console.error("Failed to load mammoth parser:", e);
+}
+
 async function getQuota() {
   const token = state.store.get('ai-token');
   if (!token) return null;
@@ -25,10 +32,56 @@ async function getModels() {
   } catch { return { models: [] }; }
 }
 
+async function preparePayloadFiles(payload) {
+  if (payload && Array.isArray(payload.files)) {
+    const textAttachments = [];
+    const validFiles = [];
+
+    for (const file of payload.files) {
+      if (file.path) {
+        try {
+          if (fs.existsSync(file.path)) {
+            const ext = path.extname(file.path).toLowerCase().replace('.', '');
+            if (ext === 'docx') {
+              if (mammoth) {
+                const result = await mammoth.extractRawText({ path: file.path });
+                textAttachments.push(`[Attached Document Content: ${file.name}]\n${result.value}\n`);
+              } else {
+                textAttachments.push(`[Attached Document Content: ${file.name}]\n(Mammoth parser unavailable. Could not parse DOCX.)\n`);
+              }
+            } else if (ext === 'doc') {
+              textAttachments.push(`[Attached Document Content: ${file.name}]\n(Binary DOC file contents could not be parsed locally. Please convert to DOCX.)\n`);
+            } else {
+              const base64Data = fs.readFileSync(file.path).toString('base64');
+              validFiles.push({
+                mimeType: file.mimeType,
+                name: file.name,
+                data: base64Data
+              });
+            }
+          } else {
+            console.error(`File path does not exist: ${file.path}`);
+          }
+        } catch (err) {
+          console.error(`Failed to read file for AI generation: ${file.path}`, err);
+        }
+      } else {
+        validFiles.push(file);
+      }
+    }
+
+    payload.files = validFiles;
+    if (textAttachments.length > 0) {
+      payload.prompt = textAttachments.join('\n') + '\n' + (payload.prompt || '');
+    }
+  }
+}
+
 async function generate(payload) {
   const token = state.store.get('ai-token');
   if (!token) return { error: 'Not authenticated' };
   try {
+    await preparePayloadFiles(payload);
     const res = await aiFetch('POST', '/v1/generate', payload, token);
     if (res.status === 401) { state.store.delete('ai-token'); return { error: '401' }; }
     return res.body;
@@ -41,7 +94,8 @@ async function saveImage(base64Data, defaultFilename) {
     const safeFilename = (defaultFilename || 'generated-image.png').replace(/[^a-zA-Z0-9_.-]/g, '_');
     const filePath = downloadService.getUniqueSavePath(downloadDir, safeFilename);
 
-    const buffer = Buffer.from(base64Data, 'base64');
+    const cleanData = base64Data.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(cleanData, 'base64');
     fs.writeFileSync(filePath, buffer);
     return { success: true, filePath, filename: path.basename(filePath) };
   } catch (err) {
@@ -49,12 +103,15 @@ async function saveImage(base64Data, defaultFilename) {
   }
 }
 
-function generateStream(payload, sender) {
+async function generateStream(payload, sender) {
   const token = state.store.get('ai-token');
   if (!token) {
     sender.send('ai-stream-error', 'Not authenticated');
     return;
   }
+
+  await preparePayloadFiles(payload);
+  let streamDone = false;
 
   const url = new URL(AI_BASE + '/v1/generate/stream');
   const lib = url.protocol === 'https:' ? https : http;
@@ -94,7 +151,10 @@ function generateStream(payload, sender) {
         if (!line.startsWith('data: ')) continue;
         const raw = line.slice(6).trim();
         if (raw === '[DONE]') {
-          sender.send('ai-stream-done');
+          if (!streamDone) {
+            streamDone = true;
+            sender.send('ai-stream-done');
+          }
           return;
         }
         try {
@@ -105,7 +165,12 @@ function generateStream(payload, sender) {
         } catch {}
       }
     });
-    res.on('end', () => sender.send('ai-stream-done'));
+    res.on('end', () => {
+      if (!streamDone) {
+        streamDone = true;
+        sender.send('ai-stream-done');
+      }
+    });
     res.on('error', (err) => sender.send('ai-stream-error', err.message));
   });
 

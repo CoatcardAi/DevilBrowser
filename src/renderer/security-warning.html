@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Security Warning</title>
+  <style>
+    body {
+      background: #060709;
+      color: #f3f4f6;
+      font-family: -apple-system, system-ui, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+    }
+    .card {
+      background: rgba(11, 15, 25, 0.65);
+      border: 1px solid rgba(244, 63, 94, 0.4);
+      border-radius: 12px;
+      padding: 30px;
+      max-width: 480px;
+      text-align: center;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+    h1 {
+      color: #f43f5e;
+      margin-top: 0;
+      font-size: 24px;
+    }
+    p {
+      color: #9ca3af;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+    .btn {
+      background: #f43f5e;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 600;
+      margin-top: 15px;
+      transition: background 0.2s;
+    }
+    .btn:hover {
+      background: #e11d48;
+    }
+    .btn-secondary {
+      background: transparent;
+      border: 1px solid rgba(255,255,255,0.1);
+      color: #9ca3af;
+      margin-left: 10px;
+    }
+    .btn-secondary:hover {
+      background: rgba(255,255,255,0.05);
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>⚠️ Security Risk Ahead</h1>
+    <p id="warning-text">The site you are trying to visit has been flagged as suspicious or does not support secure connections.</p>
+    <button class="btn" onclick="goBack()">Go Back</button>
+    <button class="btn btn-secondary" onclick="proceed()">Proceed Anyway</button>
+  </div>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const targetUrl = params.get('url');
+    const type = params.get('type') || 'phishing';
+    
+    if (type === 'http') {
+      document.getElementById('warning-text').innerText = `The site you are trying to connect to (${targetUrl}) does not support secure HTTPS connections. If you proceed, your information may be visible to others.`;
+    } else {
+      document.getElementById('warning-text').innerText = `The site (${targetUrl}) has been flagged for phishing or malware distribution. We recommend returning to safety.`;
+    }
+    
+    function goBack() {
+      window.history.back();
+    }
+    
+    function proceed() {
+      if (targetUrl) {
+        window.location.href = targetUrl + (targetUrl.includes('?') ? '&' : '?') + 'bypass=true';
+      }
+    }
+  </script>
+</body>
+</html>

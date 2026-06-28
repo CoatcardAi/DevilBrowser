@@ -21,6 +21,8 @@ window.addEventListener('message', async (event) => {
       replyTo: event.data.id,
       sourceId
     }, '*');
+  } else if (event.data.type === 'AI_SOCIAL_EVENT') {
+    ipcRenderer.send('ai-tab-context-action', event.data.payload);
   }
 });
 
@@ -168,18 +170,6 @@ const aiContextCode = `
     return { selected, imageSrc, imageMime };
   };
 
-  window.__getImageAsBase64 = async function(src) {
-    try {
-      const res = await fetch(src);
-      const blob = await res.blob();
-      return new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result.split(',')[1]);
-        reader.onerror = () => resolve(null);
-        reader.readAsDataURL(blob);
-      });
-    } catch { return null; }
-  };
 })();
 `;
 
@@ -191,9 +181,15 @@ ipcRenderer.on('ai-context-menu-trigger', async (event, action) => {
     const info = await webFrame.executeJavaScript('window.__getAIContextInfo()');
 
     if (action === 'analyse-image' && info.imageSrc) {
-      const base64 = await webFrame.executeJavaScript(
-        `window.__getImageAsBase64(${JSON.stringify(info.imageSrc)})`
-      );
+      let base64 = null;
+      if (info.imageSrc.startsWith('data:')) {
+        base64 = info.imageSrc.split(',')[1];
+      } else {
+        const res = await ipcRenderer.invoke('ai-fetch-image-base64', info.imageSrc);
+        if (res && res.success) {
+          base64 = res.base64;
+        }
+      }
       if (base64) {
         ipcRenderer.send('ai-tab-context-action', {
           action: 'analyse-image',
@@ -380,3 +376,24 @@ window.addEventListener('load', () => {
     hideSelectionPopover();
   });
 })();
+
+// Scroll progress tracker
+window.addEventListener('scroll', () => {
+  try {
+    const scrollTop = window.scrollY || document.documentElement.scrollTop;
+    const docHeight = document.documentElement.scrollHeight - document.documentElement.clientHeight;
+    const pct = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+    ipcRenderer.send('tab-scroll-progress', pct);
+  } catch (err) {}
+});
+
+// Network online status tracker
+const reportOnlineStatus = () => {
+  try {
+    ipcRenderer.send('tab-online-status', navigator.onLine);
+  } catch (err) {}
+};
+window.addEventListener('online', reportOnlineStatus);
+window.addEventListener('offline', reportOnlineStatus);
+window.addEventListener('load', reportOnlineStatus);
+reportOnlineStatus();

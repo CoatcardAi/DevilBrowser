@@ -4,6 +4,8 @@ const state = require('./state');
 function updateAlwaysOnTopState(enabled) {
   BrowserWindow.getAllWindows().forEach(w => {
     try {
+      const isHud = Array.from(state.windows.values()).some(entry => entry.hudWindow && entry.hudWindow.id === w.id);
+      if (isHud) return;
       w.setAlwaysOnTop(enabled);
     } catch (e) {
       console.error('Failed to set always on top:', e);
@@ -11,9 +13,8 @@ function updateAlwaysOnTopState(enabled) {
   });
 }
 
-function init() {
-  // Permission Request Handler
-  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+function registerPermissionHandler(ses) {
+  ses.setPermissionRequestHandler((webContents, permission, callback, details) => {
     // Automatically grant permissions to the main browser UI shell
     const isMainWindow = Array.from(state.windows.values()).some(w => w.win.webContents === webContents);
     if (isMainWindow) {
@@ -41,7 +42,7 @@ function init() {
       geolocation: false
     });
 
-    if (permission === 'media') {
+    if (permission === 'media' || permission === 'audioCapture' || permission === 'videoCapture') {
       callback(allowed.media);
     } else if (permission === 'notifications') {
       callback(allowed.notifications);
@@ -51,6 +52,13 @@ function init() {
       callback(false);
     }
   });
+}
+
+function init() {
+  registerPermissionHandler(session.defaultSession);
+  app.on('session-created', (ses) => {
+    registerPermissionHandler(ses);
+  });
 
   // Register Preferences IPC Handlers
   ipcMain.handle('get-preferences', () => ({
@@ -59,7 +67,8 @@ function init() {
     browserMode: state.browserMode,
     downloadDirectory: state.store.get('downloadDirectory') || app.getPath('downloads'),
     permissions: state.store.get('permissions', { media: true, notifications: true, geolocation: false }),
-    contentProtection: state.store.get('contentProtection', true)
+    contentProtection: state.store.get('contentProtection', true),
+    aiProfile: state.store.get('aiProfile', { jobTitle: '', writingStyle: 'professional', persona: '' })
   }));
 
   ipcMain.handle('save-preferences', (e, prefs) => {
@@ -87,6 +96,9 @@ function init() {
     }
     if (prefs.contentProtection !== undefined) {
       state.store.set('contentProtection', prefs.contentProtection);
+    }
+    if (prefs.aiProfile !== undefined) {
+      state.store.set('aiProfile', prefs.aiProfile);
     }
     return { success: true };
   });

@@ -48,15 +48,9 @@
   }
 
   async function imageUrlToBase64(url) {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Failed to fetch image: ${res.statusText}`);
-    const blob = await res.blob();
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result);
-      reader.onerror = () => reject(new Error('Failed to read image blob'));
-      reader.readAsDataURL(blob);
-    });
+    const res = await window.electronAPI.aiFetchImageBase64(url);
+    if (res.error) throw new Error(res.error);
+    return `data:${res.mimeType};base64,${res.base64}`;
   }
 
   async function loadImageModels() {

@@ -113,6 +113,14 @@ function renderTabs() {
     const tabDiv = document.createElement('div');
     tabDiv.className = `tab ${tab.id === activeTabId ? 'active' : ''}`;
     tabDiv.dataset.id = tab.id;
+    tabDiv.setAttribute('data-pinned', tab.pinned ? 'true' : 'false');
+    tabDiv.setAttribute('data-discarded', tab.discarded ? 'true' : 'false');
+
+    // Right-click context menu on tab element
+    tabDiv.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showTabContextMenu(e.clientX, e.clientY, tab);
+    });
 
     // Favicon
     const img = document.createElement('img');
@@ -222,6 +230,7 @@ function handleNavigationSubmit(url) {
 addressInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     handleNavigationSubmit(addressInput.value);
+    closeSuggestions();
     addressInput.blur();
   }
 });
@@ -246,12 +255,13 @@ btnNew.addEventListener('click', () => {
   window.electronAPI.createTab('about:blank');
 });
 
-// New Tab Page search input
-newTabSearch.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    handleNavigationSubmit(newTabSearch.value);
-  }
-});
+// New Tab Page search input - redirect focus to omnibox
+if (newTabSearch) {
+  newTabSearch.addEventListener('focus', () => {
+    addressInput.focus();
+    addressInput.select();
+  });
+}
 
 // Update SSL badge state
 function updateSSLBadge(url) {
@@ -435,7 +445,7 @@ function updateDownloadBadge() {
     downloadBadge.classList.add('hidden');
   }
 
-  // Chrome-like circular ring
+  // Coatcard-like circular ring
   const ring = document.getElementById('dl-ring-progress');
   if (!ring) return;
   const CIRCUMFERENCE = 94.25;
@@ -667,27 +677,31 @@ function updateContentProtectionUI(enabled) {
   }
 }
 
-toggleContentProtection.addEventListener('change', async (e) => {
-  const checked = e.target.checked;
-  const res = await window.electronAPI.setContentProtection(checked);
-  if (res.success) {
-    updateContentProtectionUI(checked);
-  } else {
-    alert('Content protection activation failed: ' + (res.error || 'unknown'));
-    toggleContentProtection.checked = !checked;
-  }
-});
+if (toggleContentProtection) {
+  toggleContentProtection.addEventListener('change', async (e) => {
+    const checked = e.target.checked;
+    const res = await window.electronAPI.setContentProtection(checked);
+    if (res.success) {
+      updateContentProtectionUI(checked);
+    } else {
+      alert('Content protection activation failed: ' + (res.error || 'unknown'));
+      toggleContentProtection.checked = !checked;
+    }
+  });
+}
 
 // Permissions modification
 [permMedia, permNotifications, permGeolocation].forEach(toggle => {
-  toggle.addEventListener('change', async () => {
-    preferences.permissions = {
-      media: permMedia.checked,
-      notifications: permNotifications.checked,
-      geolocation: permGeolocation.checked
-    };
-    await window.electronAPI.savePreferences(preferences);
-  });
+  if (toggle) {
+    toggle.addEventListener('change', async () => {
+      preferences.permissions = {
+        media: permMedia ? permMedia.checked : true,
+        notifications: permNotifications ? permNotifications.checked : true,
+        geolocation: permGeolocation ? permGeolocation.checked : false
+      };
+      await window.electronAPI.savePreferences(preferences);
+    });
+  }
 });
 
 if (toggleAdBlocker) {
@@ -1034,7 +1048,16 @@ function updateLayout() {
     height = isBookmarksVisible ? 110 : 82;
   }
   
+  // Set the CSS property to the base height of the topbar (WITHOUT suggestions)
   document.documentElement.style.setProperty('--topbar-height', height + 'px');
+  
+  // Now add suggestions height ONLY for the BrowserView top offset
+  const suggestionsDropdown = document.getElementById('autocomplete-suggestions');
+  const isSuggestionsOpen = suggestionsDropdown && !suggestionsDropdown.classList.contains('hidden');
+  let viewTopOffset = height;
+  if (isSuggestionsOpen) {
+    viewTopOffset += suggestionsDropdown.offsetHeight;
+  }
   
   const isAudioRoutingOpen = audioRoutingPopover && !audioRoutingPopover.classList.contains('hidden');
   const isSettingsOpen = settingsPanel && !settingsPanel.classList.contains('hidden');
@@ -1070,7 +1093,7 @@ function updateLayout() {
     rightMargin = 380;
   }
   
-  window.electronAPI.updateLayoutMargins({ height, rightMargin });
+  window.electronAPI.updateLayoutMargins({ height: viewTopOffset, rightMargin });
 }
 
 window.updateLayout = updateLayout;
@@ -1276,6 +1299,7 @@ window.electronAPI.on('tab-activated', (data) => {
   renderTabs();
   updateBookmarkStarState();
   updateAudioRoutingUIForActiveTab();
+  if (typeof updateShieldsUI === 'function') updateShieldsUI();
 });
 
 window.electronAPI.on('tab-closed', (data) => {
@@ -1291,6 +1315,7 @@ window.electronAPI.on('tab-title-updated', (data) => {
   if (currentTab) {
     currentTab.title = data.title;
     renderTabs();
+    if (typeof addToHistory === 'function') addToHistory(data.title, currentTab.url);
   }
 });
 
@@ -1321,7 +1346,9 @@ window.electronAPI.on('tab-url-updated', (data) => {
       }
       updateBookmarkStarState();
       updateAudioRoutingUIForActiveTab();
+      if (typeof updateShieldsUI === 'function') updateShieldsUI();
     }
+    if (typeof addToHistory === 'function') addToHistory(currentTab.title, data.url);
   }
 });
 
@@ -1468,6 +1495,10 @@ popoverAudioDest.addEventListener('change', savePopoverAudioSettings);
 let toastTimeout = null;
 function showToastNotification(text) {
   const toast = document.getElementById('toast-notification');
+  const statusLeft = document.getElementById('status-left');
+  
+  if (statusLeft) statusLeft.innerText = text;
+  
   if (!toast) return;
   toast.innerText = text;
   toast.classList.remove('hidden');
@@ -1478,6 +1509,7 @@ function showToastNotification(text) {
   if (toastTimeout) clearTimeout(toastTimeout);
   toastTimeout = setTimeout(() => {
     toast.classList.remove('show');
+    if (statusLeft) statusLeft.innerText = 'Ready';
     setTimeout(() => {
       toast.classList.add('hidden');
     }, 300);
@@ -1537,6 +1569,19 @@ window.electronAPI.on('shortcut-toggle-mix', async () => {
   });
   showToastNotification(`Mix Mode: ${nextSource === 'combined' ? 'Combined (Mix)' : 'Replace (System Only)'}`);
   await updateAudioRoutingUIForActiveTab();
+});
+
+window.electronAPI.on('shortcut-toggle-protection', async () => {
+  const current = toggleContentProtection.checked;
+  const next = !current;
+  const res = await window.electronAPI.setContentProtection(next);
+  if (res.success) {
+    toggleContentProtection.checked = next;
+    updateContentProtectionUI(next);
+    showToastNotification(`Content Protection: ${next ? 'On' : 'Off'}`);
+  } else {
+    showToastNotification(`Failed to toggle Protection: ${res.error || 'unknown'}`);
+  }
 });
 
 window.electronAPI.on('tab-audio-settings-changed', () => {
@@ -1891,11 +1936,509 @@ function initSettingsVault() {
   loadCredentials();
 }
 
+// --- Core Renderer Orchestration for Coatcard Features ---
+
+// Element cached references
+const btnHome = document.getElementById('btn-home');
+const btnClearAddress = document.getElementById('btn-clear-address');
+const btnQrCode = document.getElementById('btn-qr-code');
+const zoomBadge = document.getElementById('zoom-badge');
+const autocompleteSuggestions = document.getElementById('autocomplete-suggestions');
+const scrollProgressBar = document.getElementById('scroll-progress-bar');
+const offlineBanner = document.getElementById('offline-banner');
+
+const sslCertModal = document.getElementById('ssl-cert-modal');
+const certHostLabel = document.getElementById('cert-host-label');
+const certStatus = document.getElementById('cert-status');
+const certIssuer = document.getElementById('cert-issuer');
+const certFrom = document.getElementById('cert-from');
+const certTo = document.getElementById('cert-to');
+const certCipher = document.getElementById('cert-cipher');
+const certToggleJs = document.getElementById('cert-toggle-js');
+const certToggleImages = document.getElementById('cert-toggle-images');
+const btnSaveSiteSettings = document.getElementById('btn-save-site-settings');
+const btnCloseCert = document.getElementById('btn-close-cert');
+
+const qrModal = document.getElementById('qr-modal');
+const qrImage = document.getElementById('qr-image');
+const btnCloseQr = document.getElementById('btn-close-qr');
+
+const findInPageBox = document.getElementById('find-in-page-box');
+const findInput = document.getElementById('find-input');
+const findResults = document.getElementById('find-results');
+const btnFindPrev = document.getElementById('btn-find-prev');
+const btnFindNext = document.getElementById('btn-find-next');
+const findCaseSensitive = document.getElementById('find-case-sensitive');
+const findRegex = document.getElementById('find-regex');
+const btnCloseFind = document.getElementById('btn-close-find');
+
+const taskManagerModal = document.getElementById('task-manager-modal');
+const taskManagerTbody = document.getElementById('task-manager-tbody');
+const btnCloseTasks = document.getElementById('btn-close-tasks');
+
+const readerView = document.getElementById('reader-view');
+const readerTitle = document.getElementById('reader-title');
+const readerBody = document.getElementById('reader-body');
+const readerReadingTime = document.getElementById('reader-reading-time');
+const btnCloseReader = document.getElementById('btn-close-reader');
+
+// Tab Metadata Event Listener
+window.electronAPI.on('tab-metadata-updated', (data) => {
+  const tab = tabs.find(t => t.id === data.id);
+  if (tab) {
+    Object.assign(tab, data);
+    renderTabs();
+    if (data.id === activeTabId) {
+      if (data.url !== undefined) {
+        addressInput.value = data.url === 'about:blank' ? '' : data.url;
+        updateProtocolBadge(data.url);
+      }
+      if (data.zoomLevel !== undefined) {
+        showZoomBadge(data.zoomLevel);
+      }
+    }
+  }
+});
+
+// Update protocol badge styling (Feature 30)
+function updateProtocolBadge(url) {
+  if (!url || url === 'about:blank') {
+    sslBadge.style.display = 'none';
+    return;
+  }
+  sslBadge.style.display = 'flex';
+  try {
+    const u = new URL(url);
+    if (u.protocol === 'https:') {
+      sslBadge.className = 'secure';
+      sslBadge.title = 'Secure Connection (HTTPS)';
+      sslBadge.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>`;
+    } else {
+      sslBadge.className = 'warning';
+      sslBadge.title = 'Not Secure Connection (HTTP)';
+      sslBadge.innerHTML = `⚠️ HTTP`;
+    }
+  } catch (e) {
+    sslBadge.style.display = 'none';
+  }
+}
+
+// Tab crashed event listener (Feature 93)
+window.electronAPI.on('tab-crashed', (data) => {
+  const tab = tabs.find(t => t.id === data.id);
+  if (tab) {
+    tab.crashed = true;
+    showToastNotification(`Tab crashed: ${data.reason}`);
+    renderTabs();
+  }
+});
+
+// Tab right-click menu handler (Features 1-18)
+function showTabContextMenu(x, y, tab) {
+  const existing = document.getElementById('tab-context-menu');
+  if (existing) existing.remove();
+
+  const menu = document.createElement('div');
+  menu.id = 'tab-context-menu';
+  menu.style.position = 'fixed';
+  menu.style.top = `${y}px`;
+  menu.style.left = `${x}px`;
+  menu.style.background = 'var(--glass-bg)';
+  menu.style.backdropFilter = 'var(--glass-blur)';
+  menu.style.border = '1px solid var(--border-accent)';
+  menu.style.borderRadius = 'var(--r-md)';
+  menu.style.padding = '4px 0';
+  menu.style.zIndex = '10000';
+  menu.style.boxShadow = 'var(--shadow-lg), 0 0 10px rgba(139, 92, 246, 0.15)';
+  menu.style.minWidth = '160px';
+
+  const items = [
+    { label: '✨ Duplicate Tab', action: () => window.electronAPI.duplicateTab(tab.id) },
+    { label: tab.pinned ? '📌 Unpin Tab' : '📌 Pin Tab', action: () => window.electronAPI.togglePinTab(tab.id) },
+    { label: '💤 Discard Tab', enabled: !tab.pinned && tab.id !== activeTabId, action: () => window.electronAPI.discardTab(tab.id) },
+    { type: 'separator' },
+    { label: 'Close Tab', action: () => window.electronAPI.closeTab(tab.id) },
+    { label: 'Close Other Tabs', enabled: tabs.length > 1, action: () => {
+        tabs.filter(t => t.id !== tab.id && !t.pinned).forEach(t => window.electronAPI.closeTab(t.id));
+      } 
+    },
+    { label: 'Close Tabs to the Right', enabled: tabs.findIndex(t => t.id === tab.id) < tabs.length - 1, action: () => {
+        const idx = tabs.findIndex(t => t.id === tab.id);
+        tabs.slice(idx + 1).filter(t => !t.pinned).forEach(t => window.electronAPI.closeTab(t.id));
+      } 
+    },
+    { type: 'separator' },
+    { label: '⭐ Bookmark Tab', action: () => {
+        bookmarks.push({ title: tab.title, url: tab.url });
+        window.electronAPI.saveBookmarks(bookmarks);
+        showToastNotification('Tab Bookmarked!');
+        loadBookmarks();
+      } 
+    }
+  ];
+
+  items.forEach(item => {
+    if (item.type === 'separator') {
+      const sep = document.createElement('div');
+      sep.style.height = '1px';
+      sep.style.background = 'var(--border-subtle)';
+      sep.style.margin = '4px 0';
+      menu.appendChild(sep);
+      return;
+    }
+    const btn = document.createElement('button');
+    btn.style.width = '100%';
+    btn.style.padding = '6px 12px';
+    btn.style.background = 'transparent';
+    btn.style.border = 'none';
+    btn.style.color = item.enabled === false ? 'var(--text-faint)' : 'var(--text-secondary)';
+    btn.style.textAlign = 'left';
+    btn.style.fontSize = '11px';
+    btn.style.cursor = item.enabled === false ? 'not-allowed' : 'pointer';
+    btn.innerText = item.label;
+
+    if (item.enabled !== false) {
+      btn.addEventListener('mouseenter', () => { btn.style.background = 'rgba(139, 92, 246, 0.18)'; btn.style.color = 'white'; });
+      btn.addEventListener('mouseleave', () => { btn.style.background = 'transparent'; btn.style.color = 'var(--text-secondary)'; });
+      btn.addEventListener('click', () => {
+        item.action();
+        menu.remove();
+      });
+    }
+    menu.appendChild(btn);
+  });
+
+  document.body.appendChild(menu);
+
+  const closeMenu = (e) => {
+    if (!menu.contains(e.target)) {
+      menu.remove();
+      document.removeEventListener('click', closeMenu);
+      document.removeEventListener('contextmenu', closeMenu);
+    }
+  };
+  setTimeout(() => {
+    document.addEventListener('click', closeMenu);
+    document.addEventListener('contextmenu', closeMenu);
+  }, 50);
+}
+
+// Address bar clear button functionality
+if (addressInput && btnClearAddress) {
+  addressInput.addEventListener('input', () => {
+    if (addressInput.value) {
+      btnClearAddress.classList.remove('hidden');
+    } else {
+      btnClearAddress.classList.add('hidden');
+    }
+  });
+
+  btnClearAddress.addEventListener('click', () => {
+    addressInput.value = '';
+    btnClearAddress.classList.add('hidden');
+    if (typeof closeSuggestions === 'function') closeSuggestions();
+    addressInput.focus();
+  });
+}
+
+// Zoom level badge logic (Features 54, 55, 56)
+function showZoomBadge(zoomLevel) {
+  if (zoomLevel === 0) {
+    zoomBadge.classList.add('hidden');
+    return;
+  }
+  const percentage = Math.round(100 * Math.pow(1.2, zoomLevel));
+  zoomBadge.innerText = `${percentage}%`;
+  zoomBadge.classList.remove('hidden');
+}
+
+zoomBadge.addEventListener('click', () => {
+  if (activeTabId) {
+    window.electronAPI.setZoomLevel(activeTabId, 0);
+  }
+});
+
+// SSL Certificate Viewer & Site settings popover (Feature 24, 27, 88, 89)
+sslBadge.addEventListener('click', async () => {
+  const activeTab = tabs.find(t => t.id === activeTabId);
+  if (!activeTab || activeTab.url === 'about:blank') return;
+
+  try {
+    const cert = await window.electronAPI.getCertificateInfo(activeTab.url);
+    if (!cert.secure) {
+      alert('This connection is not encrypted (HTTP)');
+      return;
+    }
+    const domain = new URL(activeTab.url).hostname;
+    const settings = await window.electronAPI.getSiteSettings(domain);
+
+    certHostLabel.innerText = domain;
+    certIssuer.innerText = cert.issuer;
+    certFrom.innerText = cert.validFrom;
+    certTo.innerText = cert.validTo;
+
+    certToggleJs.checked = settings.jsEnabled;
+    certToggleImages.checked = settings.imagesEnabled;
+
+    window.electronAPI.setViewsVisibility(false);
+    sslCertModal.classList.remove('hidden');
+  } catch (err) {
+    console.error('Failed to get certificate details:', err);
+  }
+});
+
+btnSaveSiteSettings.addEventListener('click', async () => {
+  const activeTab = tabs.find(t => t.id === activeTabId);
+  if (!activeTab) return;
+  try {
+    const domain = new URL(activeTab.url).hostname;
+    await window.electronAPI.saveSiteSettings(domain, {
+      jsEnabled: certToggleJs.checked,
+      imagesEnabled: certToggleImages.checked
+    });
+    sslCertModal.classList.add('hidden');
+    window.electronAPI.setViewsVisibility(true);
+    window.electronAPI.reload(activeTabId);
+    showToastNotification('Site settings updated. Page reloaded.');
+  } catch (err) {
+    console.error(err);
+  }
+});
+
+btnCloseCert.addEventListener('click', () => {
+  sslCertModal.classList.add('hidden');
+  window.electronAPI.setViewsVisibility(true);
+});
+
+// QR Code Generator (Feature 31)
+btnQrCode.addEventListener('click', () => {
+  const activeTab = tabs.find(t => t.id === activeTabId);
+  if (!activeTab || activeTab.url === 'about:blank') return;
+
+  qrImage.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(activeTab.url)}`;
+  window.electronAPI.setViewsVisibility(false);
+  qrModal.classList.remove('hidden');
+});
+
+btnCloseQr.addEventListener('click', () => {
+  qrModal.classList.add('hidden');
+  window.electronAPI.setViewsVisibility(true);
+});
+
+// Find-in-page Ctrl+F Box handlers (Feature 53)
+window.electronAPI.on('focus-find-in-page', () => {
+  findInPageBox.classList.remove('hidden');
+  findInput.focus();
+  findInput.select();
+  runFindInPage();
+});
+
+let findTimer = null;
+function runFindInPage() {
+  if (!activeTabId) return;
+  const text = findInput.value;
+  if (!text) {
+    window.electronAPI.stopFindInPage(activeTabId, 'clearSelection');
+    findResults.innerText = '0 / 0';
+    return;
+  }
+  const isCaseSensitive = findCaseSensitive.checked;
+  window.electronAPI.findInPage(activeTabId, text, {
+    forward: true,
+    findNext: false,
+    matchCase: isCaseSensitive
+  });
+}
+
+findInput.addEventListener('input', runFindInPage);
+findInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    if (!activeTabId) return;
+    const text = findInput.value;
+    if (!text) return;
+    window.electronAPI.findInPage(activeTabId, text, {
+      forward: !e.shiftKey,
+      findNext: true,
+      matchCase: findCaseSensitive.checked
+    });
+  } else if (e.key === 'Escape') {
+    closeFindInPage();
+  }
+});
+
+btnFindPrev.addEventListener('click', () => {
+  if (!activeTabId) return;
+  window.electronAPI.findInPage(activeTabId, findInput.value, {
+    forward: false,
+    findNext: true,
+    matchCase: findCaseSensitive.checked
+  });
+});
+
+btnFindNext.addEventListener('click', () => {
+  if (!activeTabId) return;
+  window.electronAPI.findInPage(activeTabId, findInput.value, {
+    forward: true,
+    findNext: true,
+    matchCase: findCaseSensitive.checked
+  });
+});
+
+findCaseSensitive.addEventListener('change', runFindInPage);
+findRegex.addEventListener('change', runFindInPage);
+
+function closeFindInPage() {
+  findInPageBox.classList.add('hidden');
+  if (activeTabId) {
+    window.electronAPI.stopFindInPage(activeTabId, 'clearSelection');
+  }
+}
+btnCloseFind.addEventListener('click', closeFindInPage);
+
+window.electronAPI.on('find-results-updated', (data) => {
+  findResults.innerText = `${data.activeMatchOrdinal} / ${data.numberOfMatches}`;
+});
+
+// Browser Task Manager (Feature 86)
+let taskInterval = null;
+async function updateTaskManager() {
+  const metrics = await window.electronAPI.getAppMetrics();
+  taskManagerTbody.innerHTML = metrics.map(m => `
+    <tr style="border-bottom: 1px solid rgba(255,255,255,0.03);">
+      <td style="padding: 6px 8px; color: var(--text-primary); max-width: 250px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${m.name}</td>
+      <td style="padding: 6px 8px; color: var(--text-muted);">${m.pid}</td>
+      <td style="padding: 6px 8px; color: var(--accent-bright); font-weight: 500;">${(m.memory / 1024 / 1024).toFixed(1)} MB</td>
+      <td style="padding: 6px 8px; color: var(--cyan);">${m.cpu.toFixed(1)}%</td>
+    </tr>
+  `).join('');
+}
+
+function openTaskManager() {
+  window.electronAPI.setViewsVisibility(false);
+  taskManagerModal.classList.remove('hidden');
+  updateTaskManager();
+  taskInterval = setInterval(updateTaskManager, 2000);
+}
+
+function closeTaskManager() {
+  taskManagerModal.classList.add('hidden');
+  window.electronAPI.setViewsVisibility(true);
+  if (taskInterval) {
+    clearInterval(taskInterval);
+    taskInterval = null;
+  }
+}
+btnCloseTasks.addEventListener('click', closeTaskManager);
+
+// Reader View Mode (Feature 66)
+async function toggleReaderMode() {
+  const activeTab = tabs.find(t => t.id === activeTabId);
+  if (!activeTab || activeTab.url === 'about:blank') return;
+
+  if (!readerView.classList.contains('hidden')) {
+    readerView.classList.add('hidden');
+    return;
+  }
+
+  // Extract page content using AI DOM and Text fetchers
+  try {
+    const text = await window.electronAPI.aiGetPageText(activeTabId);
+    const docLength = text.length;
+    const readingTime = Math.max(1, Math.round(docLength / 1200));
+
+    readerTitle.innerText = activeTab.title || 'Extracted Reader View';
+    readerReadingTime.innerText = `⏱️ ${readingTime} min read`;
+    
+    // Format text into html blocks
+    const blocks = text.split('\n\n').map(p => {
+      const trimmed = p.trim();
+      if (!trimmed) return '';
+      if (trimmed.length < 80 && !trimmed.endsWith('.')) {
+        return `<h2 style="font-family: var(--font-header); font-size: 20px; color: white; margin-top: 24px; margin-bottom: 12px;">${trimmed}</h2>`;
+      }
+      return `<p style="margin-bottom: 16px;">${trimmed}</p>`;
+    }).join('');
+
+    readerBody.innerHTML = blocks;
+    readerView.classList.remove('hidden');
+  } catch (err) {
+    showToastNotification('Reader mode failed: ' + String(err));
+  }
+}
+
+btnCloseReader.addEventListener('click', () => {
+  readerView.classList.add('hidden');
+});
+
+// Scroll progress line update (Feature 69)
+window.electronAPI.on('active-tab-scroll', (pct) => {
+  scrollProgressBar.style.width = `${pct}%`;
+});
+
+// Connection state listener (Feature 68)
+window.electronAPI.on('network-status-changed', (isOnline) => {
+  if (isOnline) {
+    offlineBanner.classList.add('hidden');
+  } else {
+    offlineBanner.classList.remove('hidden');
+  }
+});
+
+// Home button click handler (Feature 59)
+btnHome.addEventListener('click', () => {
+  if (activeTabId) {
+    const homeUrl = localStorage.getItem('devilbrowser-homepage') || 'about:blank';
+    window.electronAPI.navigateTab({ tabId: activeTabId, url: homeUrl });
+  }
+});
+
+
+
+// Extends command palette listings with browser tasks & reader mode (Feature 86, 66)
+window.addEventListener('DOMContentLoaded', () => {
+  setTimeout(() => {
+    if (window.cmdPalette) {
+      const originalGetItems = window.cmdPalette.getItems ? window.cmdPalette.getItems.bind(window.cmdPalette) : null;
+      if (originalGetItems) {
+        window.cmdPalette.getItems = function() {
+          const defaults = originalGetItems();
+          defaults.push({
+            id: 'task-manager',
+            title: 'System: Open Task Manager',
+            category: 'Diagnostics',
+            action: () => openTaskManager()
+          });
+          defaults.push({
+            id: 'reader-mode',
+            title: 'View: Toggle Reader Mode',
+            category: 'Accessibility',
+            action: () => toggleReaderMode()
+          });
+          defaults.push({
+            id: 'view-source',
+            title: 'Developer: View Page Source',
+            category: 'Developer Tools',
+            action: () => {
+              const activeTab = tabs.find(t => t.id === activeTabId);
+              if (activeTab && activeTab.url !== 'about:blank') {
+                window.electronAPI.createTab(`view-source:${activeTab.url}`);
+              }
+            }
+          });
+          return defaults;
+        };
+      }
+    }
+  }, 1000);
+});
+
+// Initializer
 async function init() {
   initClock();
   watchTopbarHeight();
   await loadPreferences();
-  await loadBookmarks();
+  loadBookmarks();
   await updateAudioRoutingUIForActiveTab();
   await updateAccountUI();
   await updateStatsUI();
@@ -1903,6 +2446,325 @@ async function init() {
     await window.aiAuth.init();
   }
   initSettingsVault();
+  if (typeof initNewTabWidgets === 'function') initNewTabWidgets();
+  if (typeof updateShieldsUI === 'function') updateShieldsUI();
 }
 
 document.addEventListener('DOMContentLoaded', init);
+
+// ==========================================================================
+// HISTORY & AUTOCOMPLETE HELPER
+// ==========================================================================
+function addToHistory(title, url) {
+  if (!url || url === 'about:blank' || url.startsWith('chrome-error://') || url.startsWith('file:///')) return;
+  let history = JSON.parse(localStorage.getItem('browsing_history') || '[]');
+  if (history.length > 0 && history[0].url === url) return;
+  history.unshift({ title: title || url, url, timestamp: Date.now() });
+  if (history.length > 2000) history.pop();
+  localStorage.setItem('browsing_history', JSON.stringify(history));
+}
+
+// ==========================================================================
+// COATCARD SHIELDS & UPGRADES (Features 1-15)
+// ==========================================================================
+const btnShields = document.getElementById('btn-shields');
+const shieldsPopover = document.getElementById('shields-popover');
+const shieldsEnable = document.getElementById('shields-enable');
+const shieldsBlockedCount = document.getElementById('shields-blocked-count');
+const shieldsFingerprinting = document.getElementById('shields-fingerprinting');
+const shieldsBlockScripts = document.getElementById('shields-block-scripts');
+const shieldsBlockSocial = document.getElementById('shields-block-social');
+const shieldsBlockCookieBanners = document.getElementById('shields-block-cookie-banners');
+const shieldsForgetTabClose = document.getElementById('shields-forget-tab-close');
+const shieldsHttpsStatus = document.getElementById('shields-https-upgrade-status');
+
+if (btnShields) {
+  btnShields.addEventListener('click', (e) => {
+    e.stopPropagation();
+    shieldsPopover.classList.toggle('hidden');
+    audioRoutingPopover.classList.add('hidden');
+  });
+}
+
+// Close popovers on body click
+document.body.addEventListener('click', () => {
+  if (shieldsPopover) shieldsPopover.classList.add('hidden');
+  if (audioRoutingPopover) audioRoutingPopover.classList.add('hidden');
+});
+if (shieldsPopover) {
+  shieldsPopover.addEventListener('click', (e) => e.stopPropagation());
+}
+
+async function updateShieldsUI() {
+  const activeTab = tabs.find(t => t.id === activeTabId);
+  if (!activeTab || activeTab.url === 'about:blank') {
+    shieldsBlockedCount.innerText = '0';
+    return;
+  }
+  try {
+    const u = new URL(activeTab.url);
+    const host = u.hostname.toLowerCase();
+    const settings = await window.electronAPI.getSiteSettings(host);
+
+    shieldsEnable.checked = !!settings.shieldsEnabled;
+    shieldsFingerprinting.value = settings.fingerprinting || 'standard';
+    shieldsBlockScripts.checked = !!settings.blockScripts;
+    shieldsBlockSocial.checked = !!settings.blockSocial;
+    shieldsBlockCookieBanners.checked = !!settings.blockCookieBanners;
+    shieldsForgetTabClose.checked = !!settings.forgetOnClose;
+    shieldsBlockedCount.innerText = activeTab.blockedCount || 0;
+  } catch (err) {
+    shieldsBlockedCount.innerText = '0';
+  }
+}
+
+async function saveShieldsSettings() {
+  const activeTab = tabs.find(t => t.id === activeTabId);
+  if (!activeTab || activeTab.url === 'about:blank') return;
+  try {
+    const u = new URL(activeTab.url);
+    const host = u.hostname.toLowerCase();
+    const settings = {
+      jsEnabled: true,
+      imagesEnabled: true,
+      shieldsEnabled: shieldsEnable.checked,
+      blockTrackers: shieldsEnable.checked,
+      blockScripts: shieldsBlockScripts.checked,
+      blockSocial: shieldsBlockSocial.checked,
+      blockCookieBanners: shieldsBlockCookieBanners.checked,
+      forgetOnClose: shieldsForgetTabClose.checked,
+      fingerprinting: shieldsFingerprinting.value
+    };
+    await window.electronAPI.saveSiteSettings(host, settings);
+    showToastNotification('Shields settings updated!');
+    window.electronAPI.reload(activeTabId);
+  } catch (err) {}
+}
+
+[shieldsEnable, shieldsFingerprinting, shieldsBlockScripts, shieldsBlockSocial, shieldsBlockCookieBanners, shieldsForgetTabClose].forEach(el => {
+  if (el) el.addEventListener('change', saveShieldsSettings);
+});
+
+// Listen to stats update from adblocker
+window.electronAPI.on('shields-stats-updated', (data) => {
+  const activeTab = tabs.find(t => t.id === activeTabId);
+  if (activeTab) {
+    activeTab.blockedCount = data.count;
+    shieldsBlockedCount.innerText = data.count;
+  }
+});
+
+
+
+// ==========================================================================
+// OMNIBOX AUTOCOMPLETE & HISTORY (Features 50-60)
+// ==========================================================================
+const suggestionsDropdown = document.getElementById('autocomplete-suggestions');
+let currentSuggestions = [];
+let selectedSuggestionIndex = -1;
+
+function closeSuggestions() {
+  if (suggestionsDropdown) suggestionsDropdown.classList.add('hidden');
+  selectedSuggestionIndex = -1;
+  updateLayout();
+}
+
+async function handleOmniboxInput() {
+  const query = addressInput.value.trim();
+  if (!query) {
+    closeSuggestions();
+    return;
+  }
+
+  const searchSugg = await window.electronAPI.getSearchSuggestions(query);
+  const history = JSON.parse(localStorage.getItem('browsing_history') || '[]');
+  const matchedHist = history.filter(h => h.url.toLowerCase().includes(query.toLowerCase()) || h.title.toLowerCase().includes(query.toLowerCase())).slice(0, 3);
+  const matchedBms = bookmarks.filter(b => b.url.toLowerCase().includes(query.toLowerCase()) || b.title.toLowerCase().includes(query.toLowerCase())).slice(0, 3);
+
+  currentSuggestions = [];
+
+  matchedBms.forEach(bm => {
+    currentSuggestions.push({ type: 'bookmark', text: bm.url, label: bm.title, icon: '⭐' });
+  });
+
+  matchedHist.forEach(h => {
+    currentSuggestions.push({ type: 'history', text: h.url, label: h.title, icon: '📜' });
+  });
+
+  searchSugg.forEach(s => {
+    currentSuggestions.push({ type: 'search', text: s, label: s, icon: '🔍' });
+  });
+
+  renderSuggestions();
+}
+
+function renderSuggestions() {
+  if (currentSuggestions.length === 0) {
+    closeSuggestions();
+    return;
+  }
+  if (!suggestionsDropdown) return;
+  suggestionsDropdown.innerHTML = '';
+  suggestionsDropdown.classList.remove('hidden');
+
+  // Position dynamically below the address-container
+  const container = document.getElementById('address-container');
+  if (container) {
+    const rect = container.getBoundingClientRect();
+    suggestionsDropdown.style.left = rect.left + 'px';
+    suggestionsDropdown.style.width = rect.width + 'px';
+    suggestionsDropdown.style.top = rect.bottom + 'px';
+  }
+
+  currentSuggestions.forEach((s, idx) => {
+    const item = document.createElement('div');
+    item.className = `autocomplete-item ${idx === selectedSuggestionIndex ? 'selected' : ''}`;
+    
+    const query = addressInput.value.toLowerCase();
+    let labelHTML = s.label;
+    if (query) {
+      const regex = new RegExp(`(${query})`, 'gi');
+      labelHTML = s.label.replace(regex, '<strong style="color:var(--accent-bright);">$1</strong>');
+    }
+
+    item.innerHTML = `
+      <span class="autocomplete-item-icon">${s.icon}</span>
+      <span class="autocomplete-item-text">${labelHTML} <span style="font-size:10px; color:var(--text-muted); font-family:monospace; margin-left:8px;">${s.type === 'search' ? '' : s.text}</span></span>
+      <span class="autocomplete-item-type">${s.type}</span>
+      ${s.type === 'history' ? '<span class="autocomplete-item-delete" title="Delete from history">&times;</span>' : ''}
+    `;
+
+    item.addEventListener('click', (e) => {
+      if (e.target.classList.contains('autocomplete-item-delete')) {
+        e.stopPropagation();
+        deleteHistoryItem(s.text);
+        handleOmniboxInput();
+        return;
+      }
+      addressInput.value = s.text;
+      handleNavigationSubmit(s.text);
+      closeSuggestions();
+    });
+
+    suggestionsDropdown.appendChild(item);
+  });
+  updateLayout();
+}
+
+function deleteHistoryItem(url) {
+  let history = JSON.parse(localStorage.getItem('browsing_history') || '[]');
+  history = history.filter(h => h.url !== url);
+  localStorage.setItem('browsing_history', JSON.stringify(history));
+  showToastNotification('Removed from history');
+}
+
+if (addressInput) {
+  addressInput.addEventListener('input', handleOmniboxInput);
+
+  addressInput.addEventListener('keydown', (e) => {
+    if (!suggestionsDropdown || suggestionsDropdown.classList.contains('hidden')) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      selectedSuggestionIndex = (selectedSuggestionIndex + 1) % currentSuggestions.length;
+      renderSuggestions();
+      addressInput.value = currentSuggestions[selectedSuggestionIndex].text;
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      selectedSuggestionIndex = (selectedSuggestionIndex - 1 + currentSuggestions.length) % currentSuggestions.length;
+      renderSuggestions();
+      addressInput.value = currentSuggestions[selectedSuggestionIndex].text;
+    } else if (e.key === 'Escape') {
+      closeSuggestions();
+    }
+  });
+}
+
+document.addEventListener('click', (e) => {
+  if (addressInput && e.target !== addressInput && suggestionsDropdown && !suggestionsDropdown.contains(e.target)) {
+    closeSuggestions();
+  }
+});
+
+// ==========================================================================
+// NEW TAB WIDGETS & SETUP (Features 31-45)
+// ==========================================================================
+const quoteEl = document.getElementById('new-tab-quote');
+const greetingEl = document.getElementById('new-tab-greeting');
+const timeEl = document.getElementById('current-time');
+
+const quotes = [
+  '"Security is not a product, but a process." - Bruce Schneier',
+  '"The web as I envisaged it, we have not seen it yet. The future is still so much bigger." - Tim Berners-Lee',
+  '"Privacy is not an option, and it shouldn\'t be the price we pay for just getting on the Internet." - Gary Kovacs',
+  '"The only secure computer is one that is turned off, locked in a safe." - J. H. Carlin',
+  '"With great power comes great responsibility." - Uncle Ben'
+];
+
+function initNewTabWidgets() {
+  const hours = new Date().getHours();
+  let greeting = 'Good Day';
+  if (hours < 12) greeting = 'Good Morning';
+  else if (hours < 18) greeting = 'Good Afternoon';
+  else greeting = 'Good Evening';
+  if (greetingEl) greetingEl.innerText = greeting;
+
+  if (quoteEl) {
+    const idx = Math.floor(Math.random() * quotes.length);
+    quoteEl.innerText = quotes[idx];
+  }
+
+  if (timeEl) {
+    timeEl.addEventListener('click', () => {
+      const is24 = localStorage.getItem('clock_24h') === 'true';
+      localStorage.setItem('clock_24h', !is24);
+      initClock();
+    });
+  }
+
+  const btnAddQuickLink = document.getElementById('btn-add-quick-link');
+  if (btnAddQuickLink) {
+    btnAddQuickLink.addEventListener('click', () => {
+      const label = prompt('Enter shortcut name:');
+      if (!label) return;
+      const url = prompt('Enter URL (e.g. https://google.com):');
+      if (!url) return;
+      
+      const linksContainer = document.getElementById('ntp-quick-links');
+      const newLink = document.createElement('a');
+      newLink.className = 'quick-link-item';
+      newLink.href = url;
+      newLink.innerHTML = `
+        <div class="icon-wrap">${label[0].toUpperCase()}</div>
+        <span>${label}</span>
+      `;
+      linksContainer.insertBefore(newLink, btnAddQuickLink);
+      showToastNotification('Shortcut added successfully!');
+    });
+  }
+}
+
+let clockInterval = null;
+function initClock() {
+  if (clockInterval) clearInterval(clockInterval);
+  if (!timeEl) return;
+  const update = () => {
+    const is24 = localStorage.getItem('clock_24h') === 'true';
+    const date = new Date();
+    if (is24) {
+      const hrs = String(date.getHours()).padStart(2, '0');
+      const mins = String(date.getMinutes()).padStart(2, '0');
+      timeEl.innerText = `${hrs}:${mins}`;
+    } else {
+      let hrs = date.getHours();
+      const ampm = hrs >= 12 ? 'PM' : 'AM';
+      hrs = hrs % 12;
+      hrs = hrs ? hrs : 12;
+      const mins = String(date.getMinutes()).padStart(2, '0');
+      timeEl.innerText = `${hrs}:${mins} ${ampm}`;
+    }
+  };
+  update();
+  clockInterval = setInterval(update, 1000);
+}
+

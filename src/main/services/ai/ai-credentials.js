@@ -45,8 +45,12 @@ function getCredential(key) {
 
   let decryptedPassword = data.password;
   if (data.encrypted && safeStorage.isEncryptionAvailable()) {
-    const buf = Buffer.from(data.password, 'hex');
-    decryptedPassword = safeStorage.decryptString(buf);
+    try {
+      const buf = Buffer.from(data.password, 'hex');
+      decryptedPassword = safeStorage.decryptString(buf);
+    } catch (err) {
+      return { success: false, error: 'Decryption failed: ' + err.message };
+    }
   }
   return {
     success: true,

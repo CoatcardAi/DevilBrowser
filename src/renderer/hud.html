@@ -229,6 +229,101 @@
     .hud-done-line { color: var(--emerald); }
     .hud-error-line { color: var(--rose); }
 
+    .hud-btn.paused {
+      color: #f59e0b; /* Amber/Yellow for pause */
+      text-shadow: 0 0 8px rgba(245, 158, 11, 0.4);
+    }
+
+    /* Interactive block style */
+    .hud-interactive {
+      padding: 8px 12px;
+      background: rgba(139, 92, 246, 0.1);
+      border-top: 1px solid rgba(139, 92, 246, 0.2);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      animation: slide-up 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+
+    @keyframes slide-up {
+      from { transform: translateY(100%); }
+      to   { transform: translateY(0); }
+    }
+
+    .hud-interactive-prompt {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text);
+      line-height: 1.3;
+    }
+
+    .hud-interactive-options {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      max-height: 80px;
+      overflow-y: auto;
+      margin-top: 2px;
+    }
+
+    .hud-interactive-opt-btn {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 4px;
+      color: var(--text);
+      padding: 4px 8px;
+      font-size: 10px;
+      text-align: left;
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .hud-interactive-opt-btn:hover {
+      background: rgba(139, 92, 246, 0.25);
+      border-color: var(--accent);
+    }
+
+    .hud-interactive-input-wrap {
+      display: flex;
+      gap: 6px;
+      margin-top: 2px;
+    }
+
+    .hud-interactive-input {
+      flex: 1;
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+      color: var(--text);
+      padding: 4px 8px;
+      font-size: 10px;
+      outline: none;
+    }
+
+    .hud-interactive-input:focus {
+      border-color: var(--accent);
+      background: rgba(0, 0, 0, 0.6);
+    }
+
+    .hud-interactive-submit {
+      background: var(--accent);
+      border: none;
+      border-radius: 4px;
+      color: var(--text);
+      padding: 4px 10px;
+      font-size: 10px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .hud-interactive-submit:hover {
+      background: var(--accent-bright);
+    }
+
     @keyframes spin {
       100% { transform: rotate(360deg); }
     }
@@ -243,11 +338,15 @@
       </div>
       <div class="hud-header-right">
         <button id="hud-minimize" class="hud-btn" title="Minimize">▼</button>
+        <button id="hud-pause" class="hud-btn" title="Pause Task">⏸</button>
         <button id="hud-cancel" class="hud-btn danger" title="Cancel Task">✕</button>
       </div>
     </div>
     <div id="hud-steps" class="hud-steps">
       <!-- Steps will be dynamically rendered here -->
+    </div>
+    <div id="hud-interactive" class="hud-interactive" style="display: none;">
+      <!-- Interactive components injected dynamically -->
     </div>
   </div>
 

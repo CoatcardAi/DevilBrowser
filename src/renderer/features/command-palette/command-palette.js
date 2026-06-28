@@ -279,14 +279,49 @@
     return qi === q.length;
   }
 
+  let currentSearchQuery = '';
+
+  async function fetchAsyncMatches(query) {
+    currentSearchQuery = query;
+    try {
+      const results = await window.electronAPI.aiSemanticSearch(query);
+      if (currentSearchQuery !== query) return;
+      if (!isOpen) return;
+
+      const historyCommands = results.map(res => ({
+        id: 'history-' + res.url,
+        icon: '📜',
+        label: res.title || res.url,
+        category: 'History',
+        subtitle: `Semantic Match | ${res.url}`,
+        action: () => window.electronAPI.createTab(res.url)
+      }));
+
+      const q = query.toLowerCase();
+      const localMatches = allCommands
+        .filter(c => fuzzyMatch(q, c.label) || fuzzyMatch(q, c.category) || (c.subtitle && fuzzyMatch(q, c.subtitle)));
+
+      const uniqueKeys = new Set(localMatches.map(m => m.id));
+      const uniqueHistory = historyCommands.filter(h => !uniqueKeys.has(h.id));
+
+      filtered = [...localMatches, ...uniqueHistory].slice(0, 20);
+      render();
+    } catch (e) {
+      console.error('Command Palette async search failed:', e);
+    }
+  }
+
   function filterCommands(query) {
     if (!query.trim()) {
       filtered = allCommands.slice(0, 20);
+      currentSearchQuery = '';
     } else {
       const q = query.trim().toLowerCase();
       filtered = allCommands
         .filter(c => fuzzyMatch(q, c.label) || fuzzyMatch(q, c.category) || (c.subtitle && fuzzyMatch(q, c.subtitle)))
         .slice(0, 20);
+
+      fetchAsyncMatches(query.trim());
     }
     selectedIdx = 0;
   }

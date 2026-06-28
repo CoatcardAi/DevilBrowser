@@ -26,7 +26,7 @@ async function indexPage({ url, title, text }) {
       if (keys.length >= 500) delete cache[keys[0]];
       cache[url] = {
         title: title || url,
-        embedding: res.body.embedding.values,
+        embedding: res.body.embedding.values || res.body.embedding,
         snippet: text.slice(0, 300),
         indexedAt: Date.now()
       };
@@ -41,7 +41,7 @@ async function semanticSearch(query) {
   try {
     const res = await aiFetch('POST', '/v1/embeddings', { text: query }, token);
     if (!res.body || !res.body.embedding) return [];
-    const qVec = res.body.embedding.values;
+    const qVec = res.body.embedding.values || res.body.embedding;
     const cache = state.store.get('ai-page-embeddings', {});
 
     const results = Object.entries(cache).map(([url, entry]) => {

@@ -66,13 +66,13 @@ module.exports = {
   set browserMode(val) { browserMode = val; store.set('browserMode', val); },
 
   get adsBlockedToday() { return adsBlockedToday; },
-  set adsBlockedToday(val) { adsBlockedToday = val; store.set('adsBlockedToday', val); },
+  set adsBlockedToday(val) { adsBlockedToday = val; store.set('adsBlockedToday', val); broadcastStats(); },
 
   get tabsOpenedToday() { return tabsOpenedToday; },
-  set tabsOpenedToday(val) { tabsOpenedToday = val; store.set('tabsOpenedToday', val); },
+  set tabsOpenedToday(val) { tabsOpenedToday = val; store.set('tabsOpenedToday', val); broadcastStats(); },
 
   get sitesVisitedToday() { return sitesVisitedToday; },
-  set sitesVisitedToday(val) { sitesVisitedToday = val; store.set('sitesVisitedToday', val); },
+  set sitesVisitedToday(val) { sitesVisitedToday = val; store.set('sitesVisitedToday', val); broadcastStats(); },
 
   sessionStart,
   broadcastStats

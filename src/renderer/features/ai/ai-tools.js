@@ -126,6 +126,12 @@
 
       card.querySelector('.ai-tool-download-btn').addEventListener('click', async (e) => {
         const btn = e.currentTarget;
+        if (tool.type === 'external') {
+          const targetUrl = `${AI_BASE}/v1/tools/${tool.id}/download`;
+          window.electronAPI.createTab(targetUrl);
+          return;
+        }
+
         btn.disabled = true;
         btn.textContent = 'Downloading...';
         try {
